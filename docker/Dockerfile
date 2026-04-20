@@ -84,6 +84,12 @@ RUN sudo apt-get update && \
         ros-$ROS_DISTRO-realsense2-camera&& \
     sudo rm -rf /var/lib/apt/lists/*
 
+# Install Falcon-Perception with automatic backend detection (Linux -> PyTorch/CUDA)
+# Pin numpy<2 and opencv-python<4.11: cv_bridge apt binary is compiled against NumPy 1.x
+RUN git clone https://github.com/tiiuae/Falcon-Perception ${HOME}/falcon-perception && \
+    pip install -e ${HOME}/falcon-perception && \
+    pip install "numpy<2" "opencv-python<4.11"
+
 # Update rosdep and install dependencies
 RUN sudo apt-get update && \
     rosdep update --rosdistro=${DOCKER_ROS_DISTRO} && \
@@ -97,5 +103,13 @@ RUN sudo apt-get update && \
 # Build the workspace
 RUN /bin/bash -c "source /opt/ros/${DOCKER_ROS_DISTRO}/setup.bash && colcon build"
 
+# Enable lite6 gripper services in the xarm driver
+RUN sed -i \
+    -e 's/open_lite6_gripper: false/open_lite6_gripper: true/' \
+    -e 's/close_lite6_gripper: false/close_lite6_gripper: true/' \
+    -e 's/stop_lite6_gripper: false/stop_lite6_gripper: true/' \
+    ${WORKSPACE}/src/xarm_ros2/xarm_api/config/xarm_params.yaml
+
+
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/bin/bash"] 
+CMD ["/bin/bash"]
