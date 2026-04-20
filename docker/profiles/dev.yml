@@ -18,6 +18,6 @@ windows:
       panes:
         - docker compose up bringup
         - docker compose up realsense
-        - docker compose exec dev bash
+        - docker compose up camera-joint-state-publisher
         - docker compose exec dev bash
 
