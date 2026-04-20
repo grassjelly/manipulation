@@ -34,7 +34,7 @@ class CameraTagTFNode(Node):
         self.declare_parameter('tag_family',        'DICT_APRILTAG_25h9')
         self.declare_parameter('tag_id',            0)
         self.declare_parameter('tag_size',          0.05)
-        self.declare_parameter('tag_x',             0.29)
+        self.declare_parameter('tag_x',             0.45)
         self.declare_parameter('tag_y',             0.0)
         self.declare_parameter('tag_z',             0.0)
         self.declare_parameter('tag_roll',           3.14159)  # π: Z into tag (library convention)
