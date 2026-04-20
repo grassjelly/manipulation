@@ -44,6 +44,11 @@ services:
     volumes:
       - ../:/home/ros/${WORKSPACE_NAME:-ros2_ws}/src/
 
+  camera-joint-state-publisher:
+    container_name: camera-joint-state-publisher
+    extends: base
+    command: ros2 run manipulation_perception camera_joint_state_publisher
+
   dev:
     container_name: dev
     extends: base
