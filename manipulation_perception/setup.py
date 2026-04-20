@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'calibrate_camera = manipulation_perception.camera_joint_state_publisher:main'
+            'camera_joint_state_publisher = manipulation_perception.camera_joint_state_publisher:main'
         ],
     },
 )
