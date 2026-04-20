@@ -1,6 +1,4 @@
-# ros2-docker-template
-
-A minimal template for containerizing ROS2 projects using [vcstool](https://github.com/dirk-thomas/vcstool).
+# manipulation
 
 ## Prerequisites
 
