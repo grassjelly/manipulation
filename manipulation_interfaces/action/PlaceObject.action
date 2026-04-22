@@ -1,0 +1,15 @@
+# Goal
+float32 x
+float32 y
+float32 qx
+float32 qy
+float32 qz
+float32 qw
+float32 drop_height         # absolute z in link_base; <=0 uses server default (0.15 m)
+---
+# Result
+bool success
+string message
+---
+# Feedback
+string status

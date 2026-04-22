@@ -1,0 +1,16 @@
+# Goal
+float32 x
+float32 y
+float32 z
+float32 qx
+float32 qy
+float32 qz
+float32 qw
+float32 pre_grasp_height    # metres above object z; <=0 uses server default (0.1 m)
+---
+# Result
+bool success
+string message
+---
+# Feedback
+string status

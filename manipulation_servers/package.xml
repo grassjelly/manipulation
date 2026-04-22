@@ -1,16 +1,21 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>manipulation_apps</name>
+  <name>manipulation_servers</name>
   <version>0.0.0</version>
-  <description>MoveItPy wrapper for xARM robots</description>
+  <description>Pick and place action servers</description>
   <maintainer email="ros@todo.todo">ros</maintainer>
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
-  <depend>geometry_msgs</depend>
-  <depend>uf_ros_lib</depend>
   <depend>manipulation_interfaces</depend>
+  <depend>manipulation_perception</depend>
+  <depend>manipulation_apps</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>tf2_ros</depend>
+  <depend>action_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
