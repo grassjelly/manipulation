@@ -1,11 +1,10 @@
 """
 Abstract interface for prompt-driven instance segmentation.
-No ROS dependency — pure numpy/PIL.
+No ROS dependency — pure numpy/cv2.
 """
 from __future__ import annotations
 
 import base64
-import io
 import json
 import re
 import time
@@ -14,7 +13,6 @@ from dataclasses import dataclass
 
 import cv2
 import numpy as np
-from PIL import Image as PILImage, ImageDraw, ImageFont
 import litellm
 import logging
 
@@ -131,6 +129,9 @@ class PromptToSegment(ABC):
 
         results = self._build_results(masks)
         annotated_image = self._draw_overlay(rgb_image, results)
+        _save_path = "/home/ros/ros2_ws/src/debug_overlay.jpg"
+        cv2.imwrite(_save_path, cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
+        print(f"[segment] overlay saved to {_save_path}", flush=True)
         t0 = time.perf_counter()
         instances_ids = self._query_llm(annotated_image, prompt)
         print(f"[segment] _query_llm: {time.perf_counter() - t0:.3f}s", flush=True)
@@ -192,7 +193,7 @@ class PromptToSegment(ABC):
 
     def _draw_overlay(
         self, rgb_image: np.ndarray, results: list[SegmentResult]
-    ) -> PILImage.Image:
+    ) -> np.ndarray:
         """Return a copy of *rgb_image* with each mask outlined and labelled."""
         canvas = rgb_image.copy()
 
@@ -203,37 +204,35 @@ class PromptToSegment(ABC):
             contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(canvas, contours, -1, colour, 2)
 
-        base = PILImage.fromarray(canvas)
-
-        try:
-            font = ImageFont.truetype(
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20
-            )
-        except OSError:
-            font = ImageFont.load_default()
-
-        draw = ImageDraw.Draw(base)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.35
+        thickness = 1
+        pad = 1
         for result in results:
             mask_id = result.mask_ids[0]
             colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
             u, v = result.centroid_px
             label = str(mask_id)
-            bbox = draw.textbbox((u, v), label, font=font, anchor="mm")
-            pad = 3
-            draw.rectangle(
-                (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad),
-                fill=(255, 255, 255),
-            )
-            draw.text((u, v), label, fill=colour, font=font, anchor="mm")
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+            x0 = u - tw // 2 - pad
+            y0 = v - th // 2 - pad
+            x1 = u + tw // 2 + pad
+            y1 = v + th // 2 + pad + baseline
+            cv2.rectangle(canvas, (x0, y0), (x1, y1), (255, 255, 255), cv2.FILLED)
+            cv2.putText(canvas, label, (u - tw // 2, v + th // 2),
+                        font, font_scale, colour, thickness, cv2.LINE_AA)
 
-        return base
+        return canvas
 
-    def _image_to_base64(self, image: PILImage.Image) -> str:
-        buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=90)
-        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    def _image_to_base64(self, image: np.ndarray) -> str:
+        # canvas is RGB; imencode expects BGR
+        bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        ok, buf = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not ok:
+            raise RuntimeError("cv2.imencode failed")
+        return base64.b64encode(buf.tobytes()).decode("utf-8")
 
-    def _query_llm(self, annotated_image: PILImage.Image, prompt: str) -> list[list[int]]:
+    def _query_llm(self, annotated_image: np.ndarray, prompt: str) -> list[list[int]]:
         """Send the annotated image to the LLM; return mask-ID groups per instance."""
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(prompt=prompt)
         b64 = self._image_to_base64(annotated_image)
