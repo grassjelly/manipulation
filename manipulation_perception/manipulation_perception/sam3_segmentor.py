@@ -38,48 +38,6 @@ def _extract_masks(state: dict) -> tuple[list[np.ndarray], list[float]]:
 
 class Sam3Segmentor(PromptToSegment):
     """
-    ``PromptToSegment`` backend using SAM3 in everything mode.
-
-    SAM3 segments all objects with a broad generic prompt; the LLM
-    arbitrates over the labelled overlay to select the mask matching
-    the user's prompt.
-
-    Parameters
-    ----------
-    llm_client
-        ``LiteLLMClient`` used for mask arbitration. Required.
-    device
-        ``"cuda"`` or ``"cpu"``.
-    confidence_threshold
-        SAM3 mask confidence threshold (0–1).
-    resolution
-        Input resolution passed to ``Sam3Processor``.
-    """
-
-    def __init__(
-        self,
-        llm_client: LiteLLMClient,
-        device: str = "cuda",
-        confidence_threshold: float = 0.5,
-        resolution: int = 1008,
-    ) -> None:
-        super().__init__(llm_client)
-        self._processor = _build_sam3_processor(device, confidence_threshold, resolution)
-
-    def generate_masks(
-        self, rgb_image: np.ndarray, prompt: str
-    ) -> tuple[list[np.ndarray], list[float]]:
-        pil_image = PILImage.fromarray(rgb_image)
-        inference_state = self._processor.set_image(pil_image)
-        self._processor.reset_all_prompts(inference_state)
-        inference_state = self._processor.set_text_prompt(
-            state=inference_state, prompt=prompt
-        )
-        return _extract_masks(inference_state)
-
-
-class Sam3TextSegmentor(PromptToSegment):
-    """
     SAM3 backend that uses the prompt directly and bypasses LLM arbitration.
 
     The prompt is fed into SAM3's text encoder; the highest-scoring mask
