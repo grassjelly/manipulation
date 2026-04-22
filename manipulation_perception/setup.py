@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'camera_joint_state_publisher = manipulation_perception.camera_joint_state_publisher:main'
+            'camera_joint_state_publisher = manipulation_perception.camera_joint_state_publisher:main',
+            'object_segmentation = manipulation_perception.object_segmentation_node:main',
         ],
     },
 )
