@@ -15,11 +15,8 @@ from .prompt_to_segment import LiteLLMClient, PromptToSegment, SegmentResult
 
 
 def _build_sam3_processor(device: str, confidence_threshold: float, resolution: int) -> Sam3Processor:
-    # Match notebook setup: enable TF32 for Ampere GPUs and use bfloat16 globally
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    torch.autocast("cuda", dtype=torch.bfloat16).__enter__()
-
     model = build_sam3_image_model(bpe_path=None, device=device)
     return Sam3Processor(model, resolution=resolution, device=device, confidence_threshold=confidence_threshold)
 
@@ -66,9 +63,10 @@ class Sam3Segmentor(PromptToSegment):
         self, rgb_image: np.ndarray, prompt: str
     ) -> tuple[list[np.ndarray], list[float]]:
         pil_image = PILImage.fromarray(rgb_image)
-        inference_state = self._processor.set_image(pil_image)
-        self._processor.reset_all_prompts(inference_state)
-        inference_state = self._processor.set_text_prompt(state=inference_state, prompt=prompt)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            inference_state = self._processor.set_image(pil_image)
+            self._processor.reset_all_prompts(inference_state)
+            inference_state = self._processor.set_text_prompt(state=inference_state, prompt=prompt)
         return _extract_masks(inference_state)
 
     def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
