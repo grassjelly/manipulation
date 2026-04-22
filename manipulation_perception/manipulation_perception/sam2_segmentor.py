@@ -55,8 +55,9 @@ class Sam2Segmentor(PromptToSegment):
         model_cfg: str = _DEFAULT_MODEL_CFG,
         device: str = "cuda",
         points_per_side: int = 32,
-        pred_iou_thresh: float = 0.88,
+        pred_iou_thresh: float = 0.75,
         stability_score_thresh: float = 0.95,
+        min_mask_region_area: int = 100,
     ) -> None:
         super().__init__(llm_client=llm_client)
 
@@ -70,6 +71,7 @@ class Sam2Segmentor(PromptToSegment):
             points_per_side=points_per_side,
             pred_iou_thresh=pred_iou_thresh,
             stability_score_thresh=stability_score_thresh,
+            min_mask_region_area=min_mask_region_area,
         )
 
     def generate_masks(
