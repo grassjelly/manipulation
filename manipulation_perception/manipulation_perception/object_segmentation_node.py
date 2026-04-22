@@ -26,7 +26,7 @@ import tf2_ros
 from scipy.spatial.transform import Rotation
 
 from .prompt_to_segment import LiteLLMClient, SegmentResult
-from .sam3_segmentor import Sam3Segmentor
+from .sam3_segmentor import Sam3TextSegmentor
 
 _MARKER_COLOR: tuple[int, int, int] = (60, 200, 60)
 
@@ -39,12 +39,12 @@ class ObjectSegmentationNode(Node):
         self.declare_parameter('camera_topic',           '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic',            '/camera/camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic',      '/camera/camera/color/camera_info')
-        self.declare_parameter('prompt',                 'red toy  knife')
+        self.declare_parameter('prompt',                 'carrots')
         self.declare_parameter('device',                 'cuda')
         self.declare_parameter('confidence_threshold',   0.5)
         self.declare_parameter('resolution',             1008)
         self.declare_parameter('litellm_model',          'ollama/gemma4:e4b')
-        self.declare_parameter('litellm_host',           'http://localhost:4000')
+        self.declare_parameter('litellm_host',           'http://localhost:11434')
         self.declare_parameter('litellm_api_key',        'sk-1234')
         self.declare_parameter('camera_frame',           'camera_color_optical_frame')
         self.declare_parameter('reference_frame',        'link_base')
@@ -100,8 +100,7 @@ class ObjectSegmentationNode(Node):
 
         # ── load model (blocks until ready) ────────────────────────────────
         self.get_logger().info(f'Loading Sam3Segmentor (device={device})…')
-        self._segmentor = Sam3Segmentor(
-            llm_client=llm_client,
+        self._segmentor = Sam3TextSegmentor(
             device=device,
             confidence_threshold=conf_thresh,
             resolution=resolution,
@@ -148,11 +147,13 @@ class ObjectSegmentationNode(Node):
         rgb   = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         depth = self._bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
 
-        # try:
-        seg = self._segmentor.segment(rgb, self._prompt)
-        # except Exception as exc:
-        # self.get_logger().error(f'Segmentation failed: {exc}')
-        # return
+        try:
+            seg = self._segmentor.segment(rgb, self._prompt)
+        except Exception as exc:
+            self.get_logger().error(f'Segmentation failed: {exc}', throttle_duration_sec=5.0)
+            import traceback
+            self.get_logger().debug(traceback.format_exc())
+            return
 
         if seg is None:
             self.get_logger().info(
