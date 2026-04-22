@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pick_and_place = manipulation_apps.pick_and_place:main',
+            'pick_and_place_demo = manipulation_apps.pick_and_place_demo:main',
         ],
     },
 )
