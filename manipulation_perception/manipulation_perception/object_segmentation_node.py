@@ -11,6 +11,8 @@ Optionally publishes:
 """
 from __future__ import annotations
 
+import time
+
 import cv2
 import numpy as np
 import rclpy
@@ -26,9 +28,18 @@ import tf2_ros
 from scipy.spatial.transform import Rotation
 
 from .prompt_to_segment import LiteLLMClient, SegmentResult
-from .sam3_segmentor import Sam3TextSegmentor
+from .sam2_segmentor import Sam2Segmentor
 
-_MARKER_COLOR: tuple[int, int, int] = (60, 200, 60)
+_INSTANCE_COLORS: list[tuple[int, int, int]] = [
+    ( 60, 200,  60),  # green
+    (220,  80,  80),  # red
+    ( 80, 140, 220),  # blue
+    (220, 180,  50),  # yellow
+    (180,  60, 220),  # purple
+    ( 50, 210, 200),  # cyan
+    (230, 120,  50),  # orange
+    (200,  50, 130),  # pink
+]
 
 
 class ObjectSegmentationNode(Node):
@@ -39,12 +50,12 @@ class ObjectSegmentationNode(Node):
         self.declare_parameter('camera_topic',           '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic',            '/camera/camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic',      '/camera/camera/color/camera_info')
-        self.declare_parameter('prompt',                 'carrots')
+        self.declare_parameter('prompt',                 'toy eggplant')
         self.declare_parameter('device',                 'cuda')
         self.declare_parameter('confidence_threshold',   0.5)
         self.declare_parameter('resolution',             1008)
-        self.declare_parameter('litellm_model',          'ollama/gemma4:e4b')
-        self.declare_parameter('litellm_host',           'http://localhost:11434')
+        self.declare_parameter('litellm_model',          'openai/gemini-3-flash-preview')
+        self.declare_parameter('litellm_host',           'http://localhost:4000')
         self.declare_parameter('litellm_api_key',        'sk-1234')
         self.declare_parameter('camera_frame',           'camera_color_optical_frame')
         self.declare_parameter('reference_frame',        'link_base')
@@ -100,10 +111,10 @@ class ObjectSegmentationNode(Node):
 
         # ── load model (blocks until ready) ────────────────────────────────
         self.get_logger().info(f'Loading Sam3Segmentor (device={device})…')
-        self._segmentor = Sam3TextSegmentor(
+        self._segmentor = Sam2Segmentor(
+            llm_client=llm_client,
             device=device,
-            confidence_threshold=conf_thresh,
-            resolution=resolution,
+
         )
         self.get_logger().info(
             f'Sam3Segmentor ready.  prompt="{self._prompt}" '
@@ -148,14 +159,16 @@ class ObjectSegmentationNode(Node):
         depth = self._bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
 
         try:
-            seg = self._segmentor.segment(rgb, self._prompt)
+            _t0 = time.monotonic()
+            instances = self._segmentor.segment(rgb, self._prompt)
+            segment_ms = (time.monotonic() - _t0) * 1000.0
         except Exception as exc:
             self.get_logger().error(f'Segmentation failed: {exc}', throttle_duration_sec=5.0)
             import traceback
             self.get_logger().debug(traceback.format_exc())
             return
 
-        if seg is None:
+        if not instances:
             self.get_logger().info(
                 f'No segment found for prompt "{self._prompt}".',
                 throttle_duration_sec=5.0,
@@ -179,22 +192,27 @@ class ObjectSegmentationNode(Node):
             )
             return
 
-        xyz_ref = _deproject(seg.centroid_px, depth, self._camera_matrix, T_ref_cam)
-        if xyz_ref is None:
-            self.get_logger().warn(
-                'No valid depth at centroid; skipping TF.',
-                throttle_duration_sec=2.0,
-            )
-            return
-
         stamp      = self.get_clock().now()
         label_slug = self._prompt.replace(' ', '_').lower()
-        self._publish_object_tf(stamp, f'object_{label_slug}', xyz_ref)
 
         if self._enable_vis:
             self._publish_delete_all_marker()
-            self._publish_sphere_marker(stamp, 0, xyz_ref, _MARKER_COLOR)
-            overlay = _draw_overlay(rgb, seg)
+
+        for idx, seg in enumerate(instances):
+            xyz_ref = _deproject(seg.centroid_px, depth, self._camera_matrix, T_ref_cam)
+            if xyz_ref is None:
+                self.get_logger().warn(
+                    f'Instance {idx}: no valid depth at centroid; skipping TF.',
+                    throttle_duration_sec=2.0,
+                )
+                continue
+            self._publish_object_tf(stamp, f'object_{label_slug}_{idx}', xyz_ref)
+            if self._enable_vis:
+                color = _INSTANCE_COLORS[idx % len(_INSTANCE_COLORS)]
+                self._publish_sphere_marker(stamp, idx, xyz_ref, color)
+
+        if self._enable_vis:
+            overlay = _draw_overlay(rgb, instances, segment_ms, self._prompt)
             vis_msg = self._bridge.cv2_to_imgmsg(
                 cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR), encoding='bgr8'
             )
@@ -281,13 +299,37 @@ def _deproject(
     return (T_ref_cam @ p_cam)[:3]
 
 
-def _draw_overlay(rgb: np.ndarray, seg: SegmentResult) -> np.ndarray:
+def _draw_overlay(
+    rgb: np.ndarray,
+    instances: list[SegmentResult],
+    segment_ms: float,
+    prompt: str,
+) -> np.ndarray:
     canvas = rgb.copy()
-    layer = np.zeros_like(canvas)
-    layer[seg.mask] = _MARKER_COLOR
-    canvas = cv2.addWeighted(canvas, 0.55, layer, 0.45, 0)
-    u, v = seg.centroid_px
-    cv2.drawMarker(canvas, (u, v), _MARKER_COLOR, cv2.MARKER_CROSS, 24, 2)
+    for idx, seg in enumerate(instances):
+        color = _INSTANCE_COLORS[idx % len(_INSTANCE_COLORS)]
+        layer = np.zeros_like(canvas)
+        layer[seg.mask] = color
+        canvas = cv2.addWeighted(canvas, 0.55, layer, 0.45, 0)
+        u, v = seg.centroid_px
+        cv2.drawMarker(canvas, (u, v), color, cv2.MARKER_CROSS, 24, 2)
+        cv2.putText(canvas, str(idx), (u + 14, v - 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+    H, W = canvas.shape[:2]
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+    shadow = (0, 0, 0)
+
+    time_text = f'{segment_ms:.0f} ms'
+    tx, ty = 8, H - 8
+    cv2.putText(canvas, time_text, (tx + 1, ty + 1), font, scale, shadow, thickness, cv2.LINE_AA)
+    cv2.putText(canvas, time_text, (tx, ty),         font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+    (pw, _), _ = cv2.getTextSize(prompt, font, scale, thickness)
+    px, py = W - pw - 8, H - 8
+    cv2.putText(canvas, prompt, (px + 1, py + 1), font, scale, shadow, thickness, cv2.LINE_AA)
+    cv2.putText(canvas, prompt, (px, py),         font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
     return canvas
 
 
