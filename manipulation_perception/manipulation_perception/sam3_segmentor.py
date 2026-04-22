@@ -71,19 +71,16 @@ class Sam3Segmentor(PromptToSegment):
         inference_state = self._processor.set_text_prompt(state=inference_state, prompt=prompt)
         return _extract_masks(inference_state)
 
-    def segment(self, rgb_image: np.ndarray, prompt: str) -> SegmentResult | None:
-        masks, scores = self.generate_masks(rgb_image, prompt)
-        if not masks:
-            return None
-
-        best = int(np.argmax(scores))
-        mask = masks[best]
-        if not mask.any():
-            return None
-
-        ys, xs = np.where(mask)
-        return SegmentResult(
-            mask=mask,
-            centroid_px=(int(xs.mean()), int(ys.mean())),
-            mask_id=best,
-        )
+    def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
+        masks, _ = self.generate_masks(rgb_image, prompt)
+        results: list[SegmentResult] = []
+        for idx, mask in enumerate(masks):
+            if not mask.any():
+                continue
+            ys, xs = np.where(mask)
+            results.append(SegmentResult(
+                mask=mask,
+                centroid_px=(int(xs.mean()), int(ys.mean())),
+                mask_ids=[idx],
+            ))
+        return results
