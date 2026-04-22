@@ -12,6 +12,7 @@ services:
         - DOCKER_ROS_DISTRO=${DOCKER_ROS_DISTRO:-jazzy}
         - DOCKER_RMW_IMPLEMENTATION=${DOCKER_RMW_IMPLEMENTATION}
         - WORKSPACE_NAME=${WORKSPACE_NAME:-ros2_ws}
+        - HF_TOKEN=${HF_TOKEN}
       target: final
 
   base:
