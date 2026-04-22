@@ -32,15 +32,20 @@ _SYSTEM_PROMPT_TEMPLATE = (
     "objects in a scene.\n\n"
     "Context: The image has been pre-processed for instance segmentation. "
     "Each detected region is filled with a distinct colour and labelled with "
-    "a numeric mask ID.\n\n"
+    "a numeric mask ID.  A single physical object may be split across "
+    "multiple regions (e.g. separate tines of a fork, a handle and a head).\n\n"
     "Task: {prompt}\n\n"
     "Instructions:\n"
     "- Examine the labelled regions carefully.\n"
-    "- Identify which mask ID best corresponds to the task described above.\n"
-    "- If no region matches, set mask_id to -1.\n\n"
+    "- Find EVERY separate physical instance of the described object.\n"
+    "- For each instance, list ALL mask IDs whose regions together form that "
+    "one physical object.  Fragments that clearly belong together (adjacent, "
+    "same object, same colour context) should be grouped under the same "
+    "instance entry.\n"
+    "- If there are no matching objects at all, return an empty instances list.\n\n"
     "Reply ONLY with valid JSON in exactly this format:\n"
-    '{{"mask_id": <integer>, "confidence": "<high|medium|low>", '
-    '"reasoning": "<one sentence>"}}'
+    '{{"instances": [{{"mask_ids": [<int>, ...], "confidence": "<high|medium|low>", '
+    '"reasoning": "<one sentence>"}}]}}'
 )
 
 
@@ -54,9 +59,9 @@ class LiteLLMClient:
 
 @dataclass
 class SegmentResult:
-    mask: np.ndarray           # bool (H, W)
-    centroid_px: tuple[int, int]  # (u, v) pixel coords
-    mask_id: int               # index assigned during overlay
+    mask: np.ndarray              # bool (H, W) — union of all chosen mask regions
+    centroid_px: tuple[int, int]  # (u, v) pixel coords of the merged mask centroid
+    mask_ids: list[int]           # indices of all mask regions that form this instance
 
 
 class PromptToSegment(ABC):
@@ -80,9 +85,9 @@ class PromptToSegment(ABC):
     # Public API
     # ------------------------------------------------------------------
 
-    def segment(self, rgb_image: np.ndarray, prompt: str) -> SegmentResult | None:
+    def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         """
-        Locate the object described by *prompt* in *rgb_image*.
+        Locate all instances of the object described by *prompt* in *rgb_image*.
 
         Parameters
         ----------
@@ -93,22 +98,33 @@ class PromptToSegment(ABC):
 
         Returns
         -------
-        SegmentResult | None
-            Best-matching instance, or *None* when no match is found.
+        list[SegmentResult]
+            One entry per detected instance; empty when no match is found.
+            Each instance's mask is the union of all its constituent regions.
         """
         masks, _ = self.generate_masks(rgb_image, prompt)
         if not masks:
             print("No masks generated", flush=True)
-
-            return None
+            return []
 
         results = self._build_results(masks)
         annotated_image = self._draw_overlay(rgb_image, results)
-        chosen_id = self._query_llm(annotated_image, prompt)
+        instances_ids = self._query_llm(annotated_image, prompt)
 
-        if chosen_id < 0 or chosen_id >= len(results):
-            return None
-        return results[chosen_id]
+        segment_results: list[SegmentResult] = []
+        for id_group in instances_ids:
+            valid_ids = [i for i in id_group if 0 <= i < len(results)]
+            if not valid_ids:
+                continue
+            merged_mask = np.zeros(rgb_image.shape[:2], dtype=bool)
+            for i in valid_ids:
+                merged_mask |= results[i].mask
+            ys, xs = np.where(merged_mask)
+            centroid_px = (int(xs.mean()), int(ys.mean()))
+            segment_results.append(
+                SegmentResult(mask=merged_mask, centroid_px=centroid_px, mask_ids=valid_ids)
+            )
+        return segment_results
 
     # ------------------------------------------------------------------
     # Abstract hooks — subclasses provide the segmentation backend
@@ -145,7 +161,7 @@ class PromptToSegment(ABC):
                 continue
             ys, xs = np.where(mask)
             centroid_px = (int(xs.mean()), int(ys.mean()))
-            results.append(SegmentResult(mask=mask, centroid_px=centroid_px, mask_id=idx))
+            results.append(SegmentResult(mask=mask, centroid_px=centroid_px, mask_ids=[idx]))
         return results
 
     def _draw_overlay(
@@ -162,7 +178,8 @@ class PromptToSegment(ABC):
             font = ImageFont.load_default()
 
         for result in results:
-            colour = _MASK_COLOURS[result.mask_id % len(_MASK_COLOURS)]
+            mask_id = result.mask_ids[0]
+            colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
 
             overlay = PILImage.new("RGBA", base.size, (0, 0, 0, 0))
             colour_layer = PILImage.new("RGBA", base.size, colour)
@@ -172,7 +189,7 @@ class PromptToSegment(ABC):
 
             draw = ImageDraw.Draw(base)
             u, v = result.centroid_px
-            label = str(result.mask_id)
+            label = str(mask_id)
             bbox = draw.textbbox((u, v), label, font=font, anchor="mm")
             draw.rectangle(bbox, fill=(0, 0, 0, 180))
             draw.text((u, v), label, fill=(255, 255, 255, 255), font=font, anchor="mm")
@@ -184,8 +201,8 @@ class PromptToSegment(ABC):
         image.save(buf, format="JPEG", quality=90)
         return base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    def _query_llm(self, annotated_image: PILImage.Image, prompt: str) -> int:
-        """Send the annotated image to the LLM and return the chosen mask ID."""
+    def _query_llm(self, annotated_image: PILImage.Image, prompt: str) -> list[list[int]]:
+        """Send the annotated image to the LLM; return mask-ID groups per instance."""
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(prompt=prompt)
         b64 = self._image_to_base64(annotated_image)
 
@@ -205,9 +222,10 @@ class PromptToSegment(ABC):
                         {
                             "type": "text",
                             "text": (
-                                "Based on the labelled regions in this image, "
-                                f'which mask ID corresponds to: "{prompt}"? '
-                                "Reply with JSON only."
+                                "How many separate instances of "
+                                f'"{prompt}" are visible?  '
+                                "For each instance list all mask IDs that "
+                                "belong to it.  Reply with JSON only."
                             ),
                         },
                     ],
@@ -216,17 +234,24 @@ class PromptToSegment(ABC):
         )
 
         raw = response.choices[0].message.content or ""
-        return self._parse_mask_id(raw)
+        return self._parse_instances(raw)
 
     @staticmethod
-    def _parse_mask_id(raw: str) -> int:
-        """Extract mask_id from the LLM JSON reply. Returns -1 on failure."""
+    def _parse_instances(raw: str) -> list[list[int]]:
+        """Parse the LLM reply into a list of per-instance mask-ID groups."""
         cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
         try:
             data = json.loads(cleaned)
-            return int(data["mask_id"])
+            entries = data["instances"]
+            if not isinstance(entries, list):
+                return []
+            result: list[list[int]] = []
+            for entry in entries:
+                ids = entry.get("mask_ids", [])
+                if isinstance(ids, list):
+                    result.append([int(i) for i in ids])
+                else:
+                    result.append([int(ids)])
+            return result
         except (json.JSONDecodeError, KeyError, ValueError):
-            match = re.search(r'"mask_id"\s*:\s*(-?\d+)', cleaned)
-            if match:
-                return int(match.group(1))
-            return -1
+            return []
