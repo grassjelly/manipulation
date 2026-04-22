@@ -20,11 +20,13 @@ class Gripper(Node):
 
     def open(self) -> bool:
         self._call(self._open_client)
-        time.sleep(0.5)
+        time.sleep(1)
         return self._call(self._stop_client)
 
     def close(self) -> bool:
-        return self._call(self._close_client)
+        ret = self._call(self._close_client)
+        time.sleep(1)
+        return ret
 
     def stop(self) -> bool:
         return self._call(self._stop_client)
