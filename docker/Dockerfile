@@ -59,9 +59,6 @@ USER ${USERNAME}
 RUN mkdir -p ${WORKSPACE}/src
 WORKDIR ${WORKSPACE}
 
-# Copy source directory
-COPY --chown=${USERNAME}:${USERNAME} . ${WORKSPACE}/src/
-
 # Configure VGL wrapper functions in user's bashrc (gazebo-cuda only)
 RUN if [ "$BASE_IMAGE" = 'gazebo-cuda' ]; then \
         echo "BIN_TO_WRAP=(${BIN_TO_WRAP})" >> ~/.bashrc && \
@@ -69,6 +66,40 @@ RUN if [ "$BASE_IMAGE" = 'gazebo-cuda' ]; then \
         echo '  eval "function $cmd { vglrun -d /dev/dri/card\${GPU_ID:-0} \$(which $cmd) \"\$@\"; }"' >> ~/.bashrc && \
         echo 'done' >> ~/.bashrc ; \
     fi
+
+# [Optional] Install additional apt dependencies here before rosdep
+RUN sudo apt-get update && \
+    sudo apt-get install -y --no-install-recommends \
+        ros-$ROS_DISTRO-realsense2-camera&& \
+    sudo rm -rf /var/lib/apt/lists/*
+
+# Install SAM3 and runtime dependencies.
+# Pin numpy<2 and opencv-python<4.11: cv_bridge apt binary is compiled against NumPy 1.x
+RUN git clone https://github.com/facebookresearch/sam3 ${HOME}/sam3 && \
+    pip install einops pycocotools && \
+    pip install -e ${HOME}/sam3
+
+# Pre-download SAM3 model weights so the node starts without a network fetch.
+# SAM3 requires gated HuggingFace access — pass --build-arg HF_TOKEN=<your_token>.
+ARG HF_TOKEN=
+RUN HF_TOKEN=${HF_TOKEN} python3 -c "\
+import os; \
+from huggingface_hub import snapshot_download; \
+snapshot_download('facebook/sam3', token=os.environ['HF_TOKEN']); \
+print('SAM3 weights pre-loaded successfully.')"
+
+# Install SAM2 and download weights.
+# sam2 ships its config YAML files as package data, so a pip-editable install
+# is not required — but cloning makes the configs accessible at a known path.
+RUN git clone https://github.com/facebookresearch/sam2 ${HOME}/sam2 && \
+    pip install -e "${HOME}/sam2[demo]"
+
+# Pre-download SAM2.1 large checkpoint (~900 MB).
+RUN mkdir -p ${HOME}/sam2_checkpoints && \
+    wget -q -O ${HOME}/sam2_checkpoints/sam2.1_hiera_large.pt \
+        https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+
+RUN pip install litellm "numpy<2" "opencv-python<4.11"
 
 # Install RMW implementation
 RUN sudo apt-get update && \
@@ -78,17 +109,8 @@ RUN sudo apt-get update && \
     fi && \
     sudo rm -rf /var/lib/apt/lists/*
 
-# [Optional] Install additional apt dependencies here before rosdep
-RUN sudo apt-get update && \
-    sudo apt-get install -y --no-install-recommends \
-        ros-$ROS_DISTRO-realsense2-camera&& \
-    sudo rm -rf /var/lib/apt/lists/*
-
-# Install Falcon-Perception with automatic backend detection (Linux -> PyTorch/CUDA)
-# Pin numpy<2 and opencv-python<4.11: cv_bridge apt binary is compiled against NumPy 1.x
-RUN git clone https://github.com/tiiuae/Falcon-Perception ${HOME}/falcon-perception && \
-    pip install -e ${HOME}/falcon-perception && \
-    pip install "numpy<2" "opencv-python<4.11"
+# Copy source directory
+COPY --chown=${USERNAME}:${USERNAME} . ${WORKSPACE}/src/
 
 # Update rosdep and install dependencies
 RUN sudo apt-get update && \
@@ -109,7 +131,6 @@ RUN sed -i \
     -e 's/close_lite6_gripper: false/close_lite6_gripper: true/' \
     -e 's/stop_lite6_gripper: false/stop_lite6_gripper: true/' \
     ${WORKSPACE}/src/xarm_ros2/xarm_api/config/xarm_params.yaml
-
 
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/bin/bash"]
