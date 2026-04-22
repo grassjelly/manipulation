@@ -7,7 +7,6 @@ broadcasts a TF frame under *reference_frame*.
 
 Optionally publishes:
   ~/segmentation_vis   (sensor_msgs/Image)   — colour-mask overlay
-  ~/object_markers     (visualization_msgs/Marker) — SPHERE at centroid
 """
 from __future__ import annotations
 
@@ -22,13 +21,13 @@ import message_filters
 from rclpy.node import Node
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import TransformStamped
-from visualization_msgs.msg import Marker
 from cv_bridge import CvBridge
 import tf2_ros
 from scipy.spatial.transform import Rotation
 
 from .prompt_to_segment import LiteLLMClient, SegmentResult
 from .sam2_segmentor import Sam2Segmentor
+# from .sam3_segmentor import Sam3Segmentor
 
 _INSTANCE_COLORS: list[tuple[int, int, int]] = [
     ( 60, 200,  60),  # green
@@ -52,8 +51,6 @@ class ObjectSegmentationNode(Node):
         self.declare_parameter('camera_info_topic',      '/camera/camera/color/camera_info')
         self.declare_parameter('prompt',                 'fork')
         self.declare_parameter('device',                 'cuda')
-        self.declare_parameter('confidence_threshold',   0.5)
-        self.declare_parameter('resolution',             1008)
         self.declare_parameter('litellm_model',          'openai/gemini-3.1-flash-lite-preview')
         self.declare_parameter('litellm_host',           'http://localhost:4000')
         self.declare_parameter('litellm_api_key',        'sk-1234')
@@ -69,8 +66,6 @@ class ObjectSegmentationNode(Node):
         camera_info_topic = gp('camera_info_topic').string_value
         self._prompt      = gp('prompt').string_value
         device            = gp('device').string_value
-        conf_thresh       = gp('confidence_threshold').double_value
-        resolution        = gp('resolution').integer_value
         self._cam_frame   = gp('camera_frame').string_value
         self._ref_frame   = gp('reference_frame').string_value
         self._enable_vis  = gp('enable_visualization').bool_value
@@ -106,15 +101,13 @@ class ObjectSegmentationNode(Node):
 
         # ── optional visualisation publishers ──────────────────────────────
         if self._enable_vis:
-            self._vis_pub    = self.create_publisher(Image,  '~/segmentation_vis', 10)
-            self._marker_pub = self.create_publisher(Marker, '~/object_markers',   10)
+            self._vis_pub = self.create_publisher(Image, '~/segmentation_vis', 10)
 
         # ── load model (blocks until ready) ────────────────────────────────
         self.get_logger().info(f'Loading Sam3Segmentor (device={device})…')
         self._segmentor = Sam2Segmentor(
             llm_client=llm_client,
             device=device,
-
         )
         self.get_logger().info(
             f'Sam3Segmentor ready.  prompt="{self._prompt}" '
@@ -173,8 +166,6 @@ class ObjectSegmentationNode(Node):
                 f'No segment found for prompt "{self._prompt}".',
                 throttle_duration_sec=5.0,
             )
-            if self._enable_vis:
-                self._publish_delete_all_marker()
             return
 
         try:
@@ -195,9 +186,6 @@ class ObjectSegmentationNode(Node):
         stamp      = self.get_clock().now()
         label_slug = self._prompt.replace(' ', '_').lower()
 
-        if self._enable_vis:
-            self._publish_delete_all_marker()
-
         for idx, seg in enumerate(instances):
             xyz_ref = _deproject(seg.centroid_px, depth, self._camera_matrix, T_ref_cam)
             if xyz_ref is None:
@@ -206,10 +194,8 @@ class ObjectSegmentationNode(Node):
                     throttle_duration_sec=2.0,
                 )
                 continue
-            self._publish_object_tf(stamp, f'object_{label_slug}_{idx}', xyz_ref)
-            if self._enable_vis:
-                color = _INSTANCE_COLORS[idx % len(_INSTANCE_COLORS)]
-                self._publish_sphere_marker(stamp, idx, xyz_ref, color)
+            yaw_cam = _mask_to_yaw(seg.mask)
+            self._publish_object_tf(stamp, f'object_{label_slug}_{idx}', xyz_ref, yaw_cam, T_ref_cam)
 
         if self._enable_vis:
             overlay = _draw_overlay(rgb, instances, segment_ms, self._prompt)
@@ -222,8 +208,16 @@ class ObjectSegmentationNode(Node):
     # ── TF publishing ──────────────────────────────────────────────────────
 
     def _publish_object_tf(
-        self, stamp, child_frame: str, xyz: np.ndarray
+        self, stamp, child_frame: str, xyz: np.ndarray,
+        yaw_cam: float = 0.0, T_ref_cam: np.ndarray | None = None,
     ) -> None:
+        # Rotate the MBR yaw (around camera Z / optical axis) into reference frame.
+        if T_ref_cam is not None:
+            R_obj = T_ref_cam[:3, :3] @ Rotation.from_euler('z', yaw_cam).as_matrix()
+            q = Rotation.from_matrix(R_obj).as_quat()  # [x, y, z, w]
+        else:
+            q = np.array([0.0, 0.0, 0.0, 1.0])
+
         t = TransformStamped()
         t.header.stamp    = stamp.to_msg()
         t.header.frame_id = self._ref_frame
@@ -231,47 +225,27 @@ class ObjectSegmentationNode(Node):
         t.transform.translation.x = float(xyz[0])
         t.transform.translation.y = float(xyz[1])
         t.transform.translation.z = float(xyz[2])
-        t.transform.rotation.w = 1.0
+        t.transform.rotation.x = float(q[0])
+        t.transform.rotation.y = float(q[1])
+        t.transform.rotation.z = float(q[2])
+        t.transform.rotation.w = float(q[3])
         self.tf_broadcaster.sendTransform(t)
-
-    # ── marker publishing ──────────────────────────────────────────────────
-
-    def _publish_delete_all_marker(self) -> None:
-        m = Marker()
-        m.header.stamp    = self.get_clock().now().to_msg()
-        m.header.frame_id = self._ref_frame
-        m.ns              = 'segmented_objects'
-        m.action          = Marker.DELETEALL
-        self._marker_pub.publish(m)
-
-    def _publish_sphere_marker(
-        self,
-        stamp,
-        marker_id: int,
-        xyz: np.ndarray,
-        color: tuple[int, int, int],
-    ) -> None:
-        m = Marker()
-        m.header.stamp    = stamp.to_msg()
-        m.header.frame_id = self._ref_frame
-        m.ns              = 'segmented_objects'
-        m.id              = marker_id
-        m.type            = Marker.SPHERE
-        m.action          = Marker.ADD
-        m.pose.position.x = float(xyz[0])
-        m.pose.position.y = float(xyz[1])
-        m.pose.position.z = float(xyz[2])
-        m.pose.orientation.w = 1.0
-        m.scale.x = m.scale.y = m.scale.z = 0.05
-        m.color.r = color[0] / 255.0
-        m.color.g = color[1] / 255.0
-        m.color.b = color[2] / 255.0
-        m.color.a = 0.8
-        m.lifetime = rclpy.duration.Duration(seconds=2.0).to_msg()
-        self._marker_pub.publish(m)
 
 
 # ── module-level helpers ──────────────────────────────────────────────────────
+
+def _mask_to_yaw(mask: np.ndarray) -> float:
+    """Return yaw (radians) of the long axis of the mask's minimum bounding rectangle."""
+    ys, xs = np.where(mask)
+    if len(xs) < 5:
+        return 0.0
+    pts = np.column_stack([xs, ys]).astype(np.float32)
+    _, (w, h), angle = cv2.minAreaRect(pts)
+    # minAreaRect angle ∈ [-90, 0): normalise so angle follows the long axis
+    if w < h:
+        angle += 90.0
+    return np.deg2rad(angle)
+
 
 def _deproject(
     centroid_px: tuple[int, int],
@@ -311,6 +285,23 @@ def _draw_overlay(
         layer = np.zeros_like(canvas)
         layer[seg.mask] = color
         canvas = cv2.addWeighted(canvas, 0.55, layer, 0.45, 0)
+
+        # Minimum bounding rectangle + orientation arrow
+        ys, xs = np.where(seg.mask)
+        if len(xs) >= 5:
+            pts = np.column_stack([xs, ys]).astype(np.float32)
+            rect = cv2.minAreaRect(pts)
+            box = cv2.boxPoints(rect).astype(np.int32)
+            cv2.drawContours(canvas, [box], 0, color, 2)
+            (rx, ry), (rw, rh), rangle = rect
+            if rw < rh:
+                rangle += 90.0
+            arrow_len = max(rw, rh) * 0.45
+            ex = int(rx + arrow_len * np.cos(np.deg2rad(rangle)))
+            ey = int(ry + arrow_len * np.sin(np.deg2rad(rangle)))
+            cv2.arrowedLine(canvas, (int(rx), int(ry)), (ex, ey),
+                            (255, 255, 0), 2, tipLength=0.3)
+
         u, v = seg.centroid_px
         cv2.drawMarker(canvas, (u, v), color, cv2.MARKER_CROSS, 24, 2)
         cv2.putText(canvas, str(idx), (u + 14, v - 14),
