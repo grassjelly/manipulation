@@ -1,9 +1,8 @@
 """
-ROS2 node for open-vocabulary object segmentation via SAM3 + LLM.
+ROS2 node for open-vocabulary object segmentation via SAM3 or SAM2 + LLM.
 
-Subscribes to a synchronised colour + aligned-depth stream, runs the
-Sam3Segmentor at 1 Hz, deprojets the detected centroid to 3-D and
-broadcasts a TF frame under *reference_frame*.
+Subscribes to a synchronised colour + aligned-depth stream, runs ObjectFinder
+at 1 Hz, and broadcasts one TF frame per detected instance under *reference_frame*.
 
 Optionally publishes:
   ~/segmentation_vis   (sensor_msgs/Image)   — colour-mask overlay
@@ -25,9 +24,10 @@ from cv_bridge import CvBridge
 import tf2_ros
 from scipy.spatial.transform import Rotation
 
-from .prompt_to_segment import LiteLLMClient, SegmentResult
+from .prompt_to_segment import LiteLLMClient
+from .sam3_segmentor import Sam3Segmentor
 from .sam2_segmentor import Sam2Segmentor
-# from .sam3_segmentor import Sam3Segmentor
+from .object_finder import ObjectFinder, ObjectPose
 
 _INSTANCE_COLORS: list[tuple[int, int, int]] = [
     ( 60, 200,  60),  # green
@@ -49,7 +49,7 @@ class ObjectSegmentationNode(Node):
         self.declare_parameter('camera_topic',           '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic',            '/camera/camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic',      '/camera/camera/color/camera_info')
-        self.declare_parameter('prompt',                 'fork')
+        self.declare_parameter('prompt',                 'square container')
         self.declare_parameter('device',                 'cuda')
         self.declare_parameter('litellm_model',          'openai/gemini-3.1-flash-lite-preview')
         self.declare_parameter('litellm_host',           'http://localhost:4000')
@@ -77,10 +77,12 @@ class ObjectSegmentationNode(Node):
         )
 
         # ── internal state ─────────────────────────────────────────────────
-        self._bridge          = CvBridge()
-        self._camera_matrix: np.ndarray | None = None
+        self._bridge         = CvBridge()
         self._latest_color:  Image | None = None
         self._latest_depth:  Image | None = None
+        # ObjectFinder is created lazily in _info_cb once the camera matrix
+        # arrives, because ObjectFinder takes it at construction time.
+        self._finder: ObjectFinder | None = None
 
         # ── subscriptions ──────────────────────────────────────────────────
         self._info_sub = self.create_subscription(
@@ -105,8 +107,8 @@ class ObjectSegmentationNode(Node):
 
         # ── load model (blocks until ready) ────────────────────────────────
         self.get_logger().info(f'Loading Sam3Segmentor (device={device})…')
-        self._segmentor = Sam2Segmentor(
-            llm_client=llm_client,
+        self._segmentor = Sam3Segmentor(
+            # llm_client=llm_client,
             device=device,
         )
         self.get_logger().info(
@@ -114,16 +116,18 @@ class ObjectSegmentationNode(Node):
             f'ref="{self._ref_frame}" cam="{self._cam_frame}" '
             f'vis={self._enable_vis}'
         )
-   
+
         self.create_timer(1.0, self._segment_timer_cb)
 
     # ── sensor callbacks ───────────────────────────────────────────────────
 
     def _info_cb(self, msg: CameraInfo) -> None:
-        if self._camera_matrix is None:
-            self._camera_matrix = np.array(msg.k).reshape(3, 3)
+        if self._finder is None:
+            camera_matrix = np.array(msg.k).reshape(3, 3)
+            self._finder = ObjectFinder(self._segmentor, camera_matrix)
             self.get_logger().info(
-                f'Camera intrinsics received (frame: "{msg.header.frame_id}").'
+                f'Camera intrinsics received (frame: "{msg.header.frame_id}"). '
+                'ObjectFinder ready.'
             )
 
     def _sync_cb(self, color_msg: Image, depth_msg: Image) -> None:
@@ -134,7 +138,7 @@ class ObjectSegmentationNode(Node):
 
     def _segment_timer_cb(self) -> None:
         if (
-            self._camera_matrix is None
+            self._finder is None
             or self._latest_color is None
             or self._latest_depth is None
         ):
@@ -152,23 +156,6 @@ class ObjectSegmentationNode(Node):
         depth = self._bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
 
         try:
-            _t0 = time.monotonic()
-            instances = self._segmentor.segment(rgb, self._prompt)
-            segment_ms = (time.monotonic() - _t0) * 1000.0
-        except Exception as exc:
-            self.get_logger().error(f'Segmentation failed: {exc}', throttle_duration_sec=5.0)
-            import traceback
-            self.get_logger().debug(traceback.format_exc())
-            return
-
-        if not instances:
-            self.get_logger().info(
-                f'No segment found for prompt "{self._prompt}".',
-                throttle_duration_sec=5.0,
-            )
-            return
-
-        try:
             tf_cam_to_ref = self.tf_buffer.lookup_transform(
                 self._ref_frame,
                 self._cam_frame,
@@ -183,22 +170,31 @@ class ObjectSegmentationNode(Node):
             )
             return
 
+        try:
+            _t0 = time.monotonic()
+            poses = self._finder.get_object_pose(rgb, depth, self._prompt, T_ref_cam)
+            find_ms = (time.monotonic() - _t0) * 1000.0
+        except Exception as exc:
+            self.get_logger().error(f'ObjectFinder failed: {exc}', throttle_duration_sec=5.0)
+            import traceback
+            self.get_logger().debug(traceback.format_exc())
+            return
+
+        if not poses:
+            self.get_logger().info(
+                f'No objects found for prompt "{self._prompt}".',
+                throttle_duration_sec=5.0,
+            )
+            return
+
         stamp      = self.get_clock().now()
         label_slug = self._prompt.replace(' ', '_').lower()
 
-        for idx, seg in enumerate(instances):
-            xyz_ref = _deproject(seg.centroid_px, depth, self._camera_matrix, T_ref_cam)
-            if xyz_ref is None:
-                self.get_logger().warn(
-                    f'Instance {idx}: no valid depth at centroid; skipping TF.',
-                    throttle_duration_sec=2.0,
-                )
-                continue
-            yaw_cam = _mask_to_yaw(seg.mask)
-            self._publish_object_tf(stamp, f'object_{label_slug}_{idx}', xyz_ref, yaw_cam, T_ref_cam)
+        for idx, pose in enumerate(poses):
+            self._publish_object_tf(stamp, f'object_{label_slug}_{idx}', pose)
 
         if self._enable_vis:
-            overlay = _draw_overlay(rgb, instances, segment_ms, self._prompt)
+            overlay = _draw_overlay(rgb, poses, find_ms, self._prompt)
             vis_msg = self._bridge.cv2_to_imgmsg(
                 cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR), encoding='bgr8'
             )
@@ -207,24 +203,15 @@ class ObjectSegmentationNode(Node):
 
     # ── TF publishing ──────────────────────────────────────────────────────
 
-    def _publish_object_tf(
-        self, stamp, child_frame: str, xyz: np.ndarray,
-        yaw_cam: float = 0.0, T_ref_cam: np.ndarray | None = None,
-    ) -> None:
-        # Rotate the MBR yaw (around camera Z / optical axis) into reference frame.
-        if T_ref_cam is not None:
-            R_obj = T_ref_cam[:3, :3] @ Rotation.from_euler('z', yaw_cam).as_matrix()
-            q = Rotation.from_matrix(R_obj).as_quat()  # [x, y, z, w]
-        else:
-            q = np.array([0.0, 0.0, 0.0, 1.0])
-
+    def _publish_object_tf(self, stamp, child_frame: str, pose: ObjectPose) -> None:
+        q = pose.quaternion
         t = TransformStamped()
         t.header.stamp    = stamp.to_msg()
         t.header.frame_id = self._ref_frame
         t.child_frame_id  = child_frame
-        t.transform.translation.x = float(xyz[0])
-        t.transform.translation.y = float(xyz[1])
-        t.transform.translation.z = float(xyz[2])
+        t.transform.translation.x = float(pose.xyz[0])
+        t.transform.translation.y = float(pose.xyz[1])
+        t.transform.translation.z = float(pose.xyz[2])
         t.transform.rotation.x = float(q[0])
         t.transform.rotation.y = float(q[1])
         t.transform.rotation.z = float(q[2])
@@ -234,60 +221,20 @@ class ObjectSegmentationNode(Node):
 
 # ── module-level helpers ──────────────────────────────────────────────────────
 
-def _mask_to_yaw(mask: np.ndarray) -> float:
-    """Return yaw (radians) of the long axis of the mask's minimum bounding rectangle."""
-    ys, xs = np.where(mask)
-    if len(xs) < 5:
-        return 0.0
-    pts = np.column_stack([xs, ys]).astype(np.float32)
-    _, (w, h), angle = cv2.minAreaRect(pts)
-    # minAreaRect angle ∈ [-90, 0): normalise so angle follows the long axis
-    if w < h:
-        angle += 90.0
-    return np.deg2rad(angle)
-
-
-def _deproject(
-    centroid_px: tuple[int, int],
-    depth_img: np.ndarray,
-    camera_matrix: np.ndarray,
-    T_ref_cam: np.ndarray,
-) -> np.ndarray | None:
-    u, v = centroid_px
-    H, W = depth_img.shape[:2]
-    if not (0 <= u < W and 0 <= v < H):
-        return None
-
-    raw = float(depth_img[v, u])
-    if raw <= 0.0:
-        return None
-
-    Z = raw * 1e-3 if depth_img.dtype == np.uint16 else raw
-
-    fx = camera_matrix[0, 0]
-    fy = camera_matrix[1, 1]
-    cx = camera_matrix[0, 2]
-    cy = camera_matrix[1, 2]
-
-    p_cam = np.array([(u - cx) * Z / fx, (v - cy) * Z / fy, Z, 1.0])
-    return (T_ref_cam @ p_cam)[:3]
-
-
 def _draw_overlay(
     rgb: np.ndarray,
-    instances: list[SegmentResult],
-    segment_ms: float,
+    poses: list[ObjectPose],
+    find_ms: float,
     prompt: str,
 ) -> np.ndarray:
     canvas = rgb.copy()
-    for idx, seg in enumerate(instances):
+    for idx, pose in enumerate(poses):
         color = _INSTANCE_COLORS[idx % len(_INSTANCE_COLORS)]
         layer = np.zeros_like(canvas)
-        layer[seg.mask] = color
+        layer[pose.mask] = color
         canvas = cv2.addWeighted(canvas, 0.55, layer, 0.45, 0)
 
-        # Minimum bounding rectangle + orientation arrow
-        ys, xs = np.where(seg.mask)
+        ys, xs = np.where(pose.mask)
         if len(xs) >= 5:
             pts = np.column_stack([xs, ys]).astype(np.float32)
             rect = cv2.minAreaRect(pts)
@@ -302,7 +249,7 @@ def _draw_overlay(
             cv2.arrowedLine(canvas, (int(rx), int(ry)), (ex, ey),
                             (255, 255, 0), 2, tipLength=0.3)
 
-        u, v = seg.centroid_px
+        u, v = pose.centroid_px
         cv2.drawMarker(canvas, (u, v), color, cv2.MARKER_CROSS, 24, 2)
         cv2.putText(canvas, str(idx), (u + 14, v - 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
@@ -311,7 +258,7 @@ def _draw_overlay(
     font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
     shadow = (0, 0, 0)
 
-    time_text = f'{segment_ms:.0f} ms'
+    time_text = f'{find_ms:.0f} ms'
     tx, ty = 8, H - 8
     cv2.putText(canvas, time_text, (tx + 1, ty + 1), font, scale, shadow, thickness, cv2.LINE_AA)
     cv2.putText(canvas, time_text, (tx, ty),         font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
