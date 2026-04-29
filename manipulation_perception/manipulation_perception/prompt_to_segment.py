@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 import litellm
-import logging
+
 
 _MASK_COLOURS: list[tuple[int, int, int]] = [
     (220,  50,  50),  # red
@@ -26,6 +26,74 @@ _MASK_COLOURS: list[tuple[int, int, int]] = [
     (230, 120,  50),  # orange
     (200,  50, 130),  # pink
 ]
+
+
+def overlay_ratio_grid(rgb_image: np.ndarray, n: int = 10) -> np.ndarray:
+    """Return a copy of *rgb_image* with a subtle n×n ratio-coordinate grid overlaid.
+
+    Grid lines are drawn at every 1/n interval in both axes.  Each intersection
+    is labelled with its ratio coordinate ``rx,ry`` so a vision model can use
+    the grid as a visual reference when describing object positions.
+    """
+    canvas = rgb_image.copy()
+    h, w = canvas.shape[:2]
+
+    line_colour       = (180, 180, 180)
+    text_colour       = (0, 0, 0)
+    outline_colour    = (255, 255, 255)
+    font              = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale        = 0.28
+    thickness         = 1
+    outline_thickness = thickness + 2
+    pad               = 3
+
+    grid_layer = canvas.copy()
+    for i in range(n + 1):
+        t  = i / n
+        gx = int(t * (w - 1))
+        gy = int(t * (h - 1))
+        cv2.line(grid_layer, (gx, 0),      (gx, h - 1), line_colour, 1)
+        cv2.line(grid_layer, (0,  gy),     (w - 1, gy), line_colour, 1)
+    cv2.addWeighted(grid_layer, 0.5, canvas, 0.5, 0, canvas)
+
+    for iy in range(n + 1):
+        for ix in range(n + 1):
+            rx = ix / n
+            ry = iy / n
+            px = int(rx * (w - 1))
+            py = int(ry * (h - 1))
+            label = f"{rx:.1f},{ry:.1f}"
+            (tw, th), _ = cv2.getTextSize(label, font, font_scale, thickness)
+            tx = px + pad if px + pad + tw < w else px - tw - pad
+            ty = py + th + pad if py + th + pad < h else py - pad
+            cv2.putText(canvas, label, (tx, ty),
+                        font, font_scale, outline_colour, outline_thickness, cv2.LINE_AA)
+            cv2.putText(canvas, label, (tx, ty),
+                        font, font_scale, text_colour, thickness, cv2.LINE_AA)
+
+    return canvas
+
+
+_MAX_SEND_DIM = 1024  # longest side sent to the VLM for coord grounding
+
+_BBOX_SYSTEM_PROMPT = (
+    "You are a vision assistant helping a robot manipulation system.\n\n"
+    'Task: Locate every separate physical instance of "{prompt}" in the image.\n\n'
+    "The image has a reference grid overlaid on it.  Each grid line intersection "
+    "is labelled with its ratio coordinate in the form rx,ry, where rx is the "
+    "fraction of the image width (0.0 = left edge, 0.99 = right edge) and ry is "
+    "the fraction of the image height (0.0 = top edge, 0.99 = bottom edge).\n\n"
+    "Instructions:\n"
+    "- For each instance, draw a tight axis-aligned bounding box expressed as "
+    "[rx1, ry1, rx2, ry2] where (rx1, ry1) is the top-left corner and "
+    "(rx2, ry2) is the bottom-right corner — all values in [0.0, 0.99].\n"
+    "- Use the labelled grid intersections as landmarks to estimate corners accurately.\n"
+    "- Only include an instance if you are confident it matches the request.\n"
+    "- If there are no matching objects, return an empty instances list.\n\n"
+    "Reply ONLY with valid JSON in exactly this format:\n"
+    '{{"instances": [{{"bbox": [<rx1>, <ry1>, <rx2>, <ry2>], '
+    '"confidence": "<high|medium|low>", "reasoning": "<one sentence>"}}]}}'
+)
 
 _SYSTEM_PROMPT_TEMPLATE = (
     "You are a vision assistant helping a robot manipulation system identify "
@@ -98,12 +166,20 @@ class PromptToSegment(ABC):
 
     def __init__(self, llm_client: LiteLLMClient | None = None) -> None:
         self._llm = llm_client
+        self.last_grid_image: np.ndarray | None = None
+        self.last_llm_output: str | None = None
+        self.last_boxes: list[tuple[float, float, float, float]] = []
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
+    def segment(
+        self,
+        rgb_image: np.ndarray,
+        prompt: str,
+        grounding: str = "som",
+    ) -> list[SegmentResult]:
         """
         Locate all instances of the object described by *prompt* in *rgb_image*.
 
@@ -113,25 +189,41 @@ class PromptToSegment(ABC):
             ``(H, W, 3)`` uint8 array in **RGB** order.
         prompt
             Natural-language description of the target object.
+        grounding
+            Grounding technique to use:
+            - ``"som"``   — set-of-marks: generate candidate masks, render a
+              numbered overlay, and let the LLM pick the right ones.
+            - ``"coord"`` — coordinate/bbox: ask the VLM for bounding boxes
+              and feed them directly to a geometric prompt backend (e.g. SAM3).
 
         Returns
         -------
         list[SegmentResult]
             One entry per detected instance; empty when no match is found.
-            Each instance's mask is the union of all its constituent regions.
         """
+        if grounding == "som":
+            return self._segment_som(rgb_image, prompt)
+        elif grounding == "coord":
+            return self._segment_by_coord(rgb_image, prompt)
+        else:
+            raise ValueError(f"Unknown grounding technique: {grounding!r}. Choose 'som' or 'coord'.")
+
+    def _segment_som(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
+        """Set-of-marks grounding: numbered mask overlay + LLM arbitration."""
         t0 = time.perf_counter()
-        masks, _ = self.generate_masks(rgb_image, prompt)
-        print(f"[segment] generate_masks: {time.perf_counter() - t0:.3f}s", flush=True)
+        masks, _ = self.generate_masks_from_prompt(rgb_image, prompt)
+        print(f"[segment] generate_masks_from_prompt: {time.perf_counter() - t0:.3f}s", flush=True)
         if not masks:
             print("No masks generated", flush=True)
             return []
 
         results = self._build_results(masks)
-        annotated_image = self._draw_overlay(rgb_image, results)
-        _save_path = "/home/ros/ros2_ws/src/debug_overlay.jpg"
-        cv2.imwrite(_save_path, cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
-        print(f"[segment] overlay saved to {_save_path}", flush=True)
+        annotated_image = self.draw_overlay(rgb_image, results)
+
+        # _save_path = "/home/ros/ros2_ws/src/debug_overlay.jpg"
+        # cv2.imwrite(_save_path, cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
+        # print(f"[segment] overlay saved to {_save_path}", flush=True)
+
         t0 = time.perf_counter()
         instances_ids = self._query_llm(annotated_image, prompt)
         print(f"[segment] _query_llm: {time.perf_counter() - t0:.3f}s", flush=True)
@@ -151,28 +243,67 @@ class PromptToSegment(ABC):
             )
         return segment_results
 
+    def _segment_by_coord(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
+        """Coordinate/bbox grounding: VLM predicts boxes, backend refines them into masks."""
+        h, w = rgb_image.shape[:2]
+        scale  = min(_MAX_SEND_DIM / max(h, w), 1.0)
+        send_w = int(w * scale)
+        send_h = int(h * scale)
+        send_img = (cv2.resize(rgb_image, (send_w, send_h), interpolation=cv2.INTER_AREA)
+                    if scale < 1.0 else rgb_image.copy())
+
+        send_img = overlay_ratio_grid(send_img)
+        self.last_grid_image = send_img
+
+        t0 = time.perf_counter()
+        boxes = self._ask_vlm_for_boxes(send_img, prompt)
+        print(f"[segment] VLM bbox prediction: {time.perf_counter() - t0:.3f}s  ({len(boxes)} box(es))", flush=True)
+
+        if not boxes:
+            return []
+
+        t0 = time.perf_counter()
+        masks, _ = self.generate_masks_from_bbox(rgb_image, boxes)
+        print(f"[segment] generate_masks_from_bbox: {time.perf_counter() - t0:.3f}s", flush=True)
+
+        if not masks:
+            return []
+        return self._build_results(masks)
+
     # ------------------------------------------------------------------
     # Abstract hooks — subclasses provide the segmentation backend
     # ------------------------------------------------------------------
+
     @abstractmethod
-    def generate_masks(
+    def generate_masks_from_prompt(
         self, rgb_image: np.ndarray, prompt: str
     ) -> tuple[list[np.ndarray], list[float]]:
         """
-        Run backend segmentation and return ``(masks, scores)``.
+        SOM backend: generate many candidate masks from the image alone.
+
+        Returns parallel lists of boolean masks ``(H, W)`` and confidence
+        scores, sorted by score descending.  Used by ``_segment_som``.
+        """
+
+    @abstractmethod
+    def generate_masks_from_bbox(
+        self,
+        rgb_image: np.ndarray,
+        boxes: list[tuple[float, float, float, float]],
+    ) -> tuple[list[np.ndarray], list[float]]:
+        """
+        Coord backend: apply geometric prompts to produce one mask per box.
 
         Parameters
         ----------
         rgb_image
             ``(H, W, 3)`` uint8 array in **RGB** order.
-        prompt
-            Natural-language description of the target object.
+        boxes
+            VLM-predicted bounding boxes as ``[(rx1, ry1, rx2, ry2), ...]``
+            in ratio coordinates (0.0–1.0).  One box per detected instance.
 
-        Returns
-        -------
-        tuple[list[np.ndarray], list[float]]
-            Parallel lists of boolean masks ``(H, W)`` and confidence scores,
-            sorted by score descending.
+        Returns parallel lists of boolean masks ``(H, W)`` and confidence
+        scores, one entry per box.  Used by ``_segment_by_coord``.
         """
 
     # ------------------------------------------------------------------
@@ -191,8 +322,12 @@ class PromptToSegment(ABC):
             results.append(SegmentResult(mask=mask, centroid_px=centroid_px, mask_ids=[idx]))
         return results
 
-    def _draw_overlay(
-        self, rgb_image: np.ndarray, results: list[SegmentResult]
+    def draw_overlay(
+        self,
+        rgb_image: np.ndarray,
+        results: list[SegmentResult],
+        contour_thickness: int = 2,
+        font_scale: float = 0.5,
     ) -> np.ndarray:
         """Return a copy of *rgb_image* with each mask outlined and labelled."""
         canvas = rgb_image.copy()
@@ -202,25 +337,24 @@ class PromptToSegment(ABC):
             colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
             mask_u8 = result.mask.astype(np.uint8) * 255
             contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(canvas, contours, -1, colour, 2)
+            cv2.drawContours(canvas, contours, -1, colour, contour_thickness)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.35
-        thickness = 1
+        text_thickness = max(1, round(font_scale * 2))
         pad = 1
         for result in results:
             mask_id = result.mask_ids[0]
             colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
             u, v = result.centroid_px
             label = str(mask_id)
-            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, text_thickness)
             x0 = u - tw // 2 - pad
             y0 = v - th // 2 - pad
             x1 = u + tw // 2 + pad
             y1 = v + th // 2 + pad + baseline
             cv2.rectangle(canvas, (x0, y0), (x1, y1), (255, 255, 255), cv2.FILLED)
             cv2.putText(canvas, label, (u - tw // 2, v + th // 2),
-                        font, font_scale, colour, thickness, cv2.LINE_AA)
+                        font, font_scale, colour, text_thickness, cv2.LINE_AA)
 
         return canvas
 
@@ -266,6 +400,87 @@ class PromptToSegment(ABC):
 
         raw = response.choices[0].message.content or ""
         return self._parse_instances(raw)
+
+    def _ask_vlm_for_boxes(
+        self, grid_image: np.ndarray, prompt: str
+    ) -> list[tuple[float, float, float, float]]:
+        """Send the grid-overlaid image to the VLM; return ratio bounding boxes."""
+        system_prompt = _BBOX_SYSTEM_PROMPT.format(prompt=prompt)
+        b64 = self._image_to_base64(grid_image)
+
+        response = litellm.completion(
+            model=self._llm.model,
+            api_base=self._llm.api_base,
+            api_key=self._llm.api_key,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                f'How many separate instances of "{prompt}" are visible? '
+                                "Draw a tight bounding box around each one using ratio "
+                                "coordinates [rx1, ry1, rx2, ry2] as shown by the grid. "
+                                "Reply with JSON only."
+                            ),
+                        },
+                    ],
+                },
+            ],
+        )
+
+        raw = response.choices[0].message.content or ""
+        self.last_llm_output = raw
+        boxes = self._parse_boxes(raw)
+        self.last_boxes = boxes
+        return boxes
+
+    @staticmethod
+    def _parse_boxes(raw: str) -> list[tuple[float, float, float, float]]:
+        """Parse the VLM reply into a list of ``(rx1, ry1, rx2, ry2)`` ratio boxes."""
+        cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
+        decoder = json.JSONDecoder()
+        data = None
+        pos = 0
+        while pos < len(cleaned):
+            try:
+                obj, end = decoder.raw_decode(cleaned, pos)
+                if isinstance(obj, dict) and "instances" in obj:
+                    data = obj
+                pos = end
+            except json.JSONDecodeError:
+                pos += 1
+
+        if data is None:
+            return []
+
+        boxes: list[tuple[float, float, float, float]] = []
+        for entry in data.get("instances", []):
+            if not isinstance(entry, dict):
+                continue
+            b = entry.get("bbox", [])
+            if not isinstance(b, (list, tuple)) or len(b) != 4:
+                continue
+            try:
+                rx1, ry1, rx2, ry2 = (float(v) for v in b)
+            except (TypeError, ValueError):
+                continue
+            rx1, ry1, rx2, ry2 = (
+                max(0.0, min(1.0, rx1)),
+                max(0.0, min(1.0, ry1)),
+                max(0.0, min(1.0, rx2)),
+                max(0.0, min(1.0, ry2)),
+            )
+            if rx2 <= rx1 or ry2 <= ry1:
+                continue
+            boxes.append((rx1, ry1, rx2, ry2))
+        return boxes
 
     @staticmethod
     def _parse_instances(raw: str) -> list[list[int]]:
