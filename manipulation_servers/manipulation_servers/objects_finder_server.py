@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-ROS2 service server that exposes ObjectFinder over the find_object service.
+ROS2 service server that exposes ObjectFinder over the find_objects service.
 
 Subscribes to a synchronised colour + depth stream and, on each service call,
-runs ObjectFinder against the latest cached frame.
+runs ObjectFinder against the latest cached frame, returning all detected poses.
 """
 from __future__ import annotations
 
@@ -23,12 +23,12 @@ from scipy.spatial.transform import Rotation
 
 from manipulation_perception.sam3_segmentor import Sam3Segmentor
 from manipulation_perception.object_finder import ObjectFinder
-from manipulation_interfaces.srv import FindObject
+from manipulation_interfaces.srv import FindObjects
 
 
-class ObjectFinderServer(Node):
+class ObjectsFinderServer(Node):
     def __init__(self) -> None:
-        super().__init__('object_finder_server')
+        super().__init__('objects_finder_server')
 
         self.declare_parameter('camera_topic',      '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic',       '/camera/camera/aligned_depth_to_color/image_raw')
@@ -71,14 +71,14 @@ class ObjectFinderServer(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self._service = self.create_service(
-            FindObject, 'find_object', self._handle,
+            FindObjects, 'find_objects', self._handle,
             callback_group=self._exec_cb_group,
         )
 
         self.get_logger().info(f'Loading Sam3Segmentor (device={device})…')
         self._segmentor = Sam3Segmentor(device=device)
         self.get_logger().info(
-            f'ObjectFinderServer ready. '
+            f'ObjectsFinderServer ready. '
             f'ref="{self._ref_frame}" cam="{self._cam_frame}"'
         )
 
@@ -96,7 +96,7 @@ class ObjectFinderServer(Node):
 
     # ── service handler ────────────────────────────────────────────────────
 
-    def _handle(self, request: FindObject.Request, response: FindObject.Response):
+    def _handle(self, request: FindObjects.Request, response: FindObjects.Response):
         log = self.get_logger()
         prompt = request.object_prompt
 
@@ -138,19 +138,18 @@ class ObjectFinderServer(Node):
             log.info(response.message)
             return response
 
-        pose = poses[0]
         response.found   = True
-        response.message = 'OK'
-        response.x  = float(pose.xyz[0])
-        response.y  = float(pose.xyz[1])
-        response.z  = float(pose.xyz[2])
-        response.qx = float(pose.quaternion[0])
-        response.qy = float(pose.quaternion[1])
-        response.qz = float(pose.quaternion[2])
-        response.qw = float(pose.quaternion[3])
+        response.message = f'Found {len(poses)} object(s) matching "{prompt}"'
+        response.x  = [float(p.xyz[0])        for p in poses]
+        response.y  = [float(p.xyz[1])        for p in poses]
+        response.z  = [float(p.xyz[2])        for p in poses]
+        response.qx = [float(p.quaternion[0]) for p in poses]
+        response.qy = [float(p.quaternion[1]) for p in poses]
+        response.qz = [float(p.quaternion[2]) for p in poses]
+        response.qw = [float(p.quaternion[3]) for p in poses]
         log.info(
-            f'Found "{prompt}" at '
-            f'({response.x:.3f}, {response.y:.3f}, {response.z:.3f})'
+            f'Found {len(poses)} "{prompt}" — '
+            f'first at ({response.x[0]:.3f}, {response.y[0]:.3f}, {response.z[0]:.3f})'
         )
         return response
 
@@ -166,7 +165,7 @@ def _tf_msg_to_matrix(tf_stamped) -> np.ndarray:
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = ObjectFinderServer()
+    node = ObjectsFinderServer()
     executor = MultiThreadedExecutor()
     executor.add_node(node)
     try:

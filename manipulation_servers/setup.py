@@ -25,7 +25,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'object_finder_server = manipulation_servers.object_finder_server:main',
+            'objects_finder_server = manipulation_servers.objects_finder_server:main',
             'pick_server = manipulation_servers.pick_server:main',
             'place_server = manipulation_servers.place_server:main',
         ],

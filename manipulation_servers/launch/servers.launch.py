@@ -16,10 +16,10 @@ def generate_launch_description():
     device            = LaunchConfiguration('device')
 
     # ── nodes ───────────────────────────────────────────────────────────────
-    object_finder_server = Node(
+    objects_finder_server = Node(
         package='manipulation_servers',
-        executable='object_finder_server',
-        name='object_finder_server',
+        executable='objects_finder_server',
+        name='objects_finder_server',
         output='screen',
         parameters=[{
             'camera_topic':      camera_topic,
@@ -60,7 +60,7 @@ def generate_launch_description():
         DeclareLaunchArgument('camera_frame',      default_value='camera_color_optical_frame'),
         DeclareLaunchArgument('reference_frame',   default_value='link_base'),
         DeclareLaunchArgument('device',            default_value='cuda'),
-        object_finder_server,
+        objects_finder_server,
         pick_server,
         place_server,
     ])
