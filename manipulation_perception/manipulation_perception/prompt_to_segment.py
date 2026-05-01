@@ -174,14 +174,17 @@ class PromptToSegment(ABC):
     # Public API
     # ------------------------------------------------------------------
 
+    @abstractmethod
     def segment(
         self,
         rgb_image: np.ndarray,
         prompt: str,
-        grounding: str = "som",
     ) -> list[SegmentResult]:
         """
         Locate all instances of the object described by *prompt* in *rgb_image*.
+
+        Subclasses must implement this method and choose which grounding
+        technique to use (e.g. call ``segment_som`` or ``segment_by_coord``).
 
         Parameters
         ----------
@@ -189,35 +192,23 @@ class PromptToSegment(ABC):
             ``(H, W, 3)`` uint8 array in **RGB** order.
         prompt
             Natural-language description of the target object.
-        grounding
-            Grounding technique to use:
-            - ``"som"``   — set-of-marks: generate candidate masks, render a
-              numbered overlay, and let the LLM pick the right ones.
-            - ``"coord"`` — coordinate/bbox: ask the VLM for bounding boxes
-              and feed them directly to a geometric prompt backend (e.g. SAM3).
 
         Returns
         -------
         list[SegmentResult]
             One entry per detected instance; empty when no match is found.
         """
-        if grounding == "som":
-            return self._segment_som(rgb_image, prompt)
-        elif grounding == "coord":
-            return self._segment_by_coord(rgb_image, prompt)
-        else:
-            raise ValueError(f"Unknown grounding technique: {grounding!r}. Choose 'som' or 'coord'.")
 
-    def _segment_som(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
+    def segment_som(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         """Set-of-marks grounding: numbered mask overlay + LLM arbitration."""
         t0 = time.perf_counter()
-        masks, _ = self.generate_masks_from_prompt(rgb_image, prompt)
-        print(f"[segment] generate_masks_from_prompt: {time.perf_counter() - t0:.3f}s", flush=True)
+        masks, _ = self.generate_masks(rgb_image)
+        print(f"[segment] generate_masks: {time.perf_counter() - t0:.3f}s", flush=True)
         if not masks:
             print("No masks generated", flush=True)
             return []
 
-        results = self._build_results(masks)
+        results = self.build_results(masks)
         annotated_image = self.draw_overlay(rgb_image, results)
 
         # _save_path = "/home/ros/ros2_ws/src/debug_overlay.jpg"
@@ -243,7 +234,7 @@ class PromptToSegment(ABC):
             )
         return segment_results
 
-    def _segment_by_coord(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
+    def segment_by_coord(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         """Coordinate/bbox grounding: VLM predicts boxes, backend refines them into masks."""
         h, w = rgb_image.shape[:2]
         scale  = min(_MAX_SEND_DIM / max(h, w), 1.0)
@@ -268,24 +259,25 @@ class PromptToSegment(ABC):
 
         if not masks:
             return []
-        return self._build_results(masks)
+        return self.build_results(masks)
 
     # ------------------------------------------------------------------
     # Abstract hooks — subclasses provide the segmentation backend
     # ------------------------------------------------------------------
 
-    @abstractmethod
-    def generate_masks_from_prompt(
-        self, rgb_image: np.ndarray, prompt: str
+    def generate_masks(
+        self, rgb_image: np.ndarray
     ) -> tuple[list[np.ndarray], list[float]]:
         """
         SOM backend: generate many candidate masks from the image alone.
 
         Returns parallel lists of boolean masks ``(H, W)`` and confidence
-        scores, sorted by score descending.  Used by ``_segment_som``.
+        scores, sorted by score descending.  Used by ``segment_som``.
         """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement generate_masks."
+        )
 
-    @abstractmethod
     def generate_masks_from_bbox(
         self,
         rgb_image: np.ndarray,
@@ -303,14 +295,33 @@ class PromptToSegment(ABC):
             in ratio coordinates (0.0–1.0).  One box per detected instance.
 
         Returns parallel lists of boolean masks ``(H, W)`` and confidence
-        scores, one entry per box.  Used by ``_segment_by_coord``.
+        scores, one entry per box.  Used by ``segment_by_coord``.
         """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement generate_masks_from_bbox."
+        )
+
+    def generate_masks_from_prompt(
+        self, rgb_image: np.ndarray, prompt: str
+    ) -> tuple[list[np.ndarray], list[float]]:
+        """
+        Text-prompt backend: generate masks directly from a text prompt,
+        bypassing LLM arbitration entirely.
+
+        Returns parallel lists of boolean masks ``(H, W)`` and confidence
+        scores, sorted by score descending.  Called by ``segment`` when no
+        ``llm_client`` is configured.  Subclasses that support native text
+        prompting should override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement generate_masks_from_prompt."
+        )
 
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
 
-    def _build_results(
+    def build_results(
         self, masks: list[np.ndarray], min_mask_region_area: int = 100
     ) -> list[SegmentResult]:
         results: list[SegmentResult] = []

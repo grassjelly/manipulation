@@ -51,7 +51,7 @@ class Sam3Segmentor(PromptToSegment):
     SAM3 backend: VLM predicts bounding boxes, SAM3 refines them into masks.
 
     The box-prediction step (VLM call, grid overlay, parsing) is handled by
-    the base class ``_segment_by_coord``; this class only implements the
+    the base class ``segment_by_coord``; this class only implements the
     SAM3-specific geometry via ``add_geometric_prompt``.
 
     Parameters
@@ -74,7 +74,7 @@ class Sam3Segmentor(PromptToSegment):
         confidence_threshold: float = 0.5,
         resolution: int = 1008,
     ) -> None:
-        super().__init__(llm_client=llm_client or LiteLLMClient())
+        super().__init__(llm_client=llm_client)
         self._processor = _build_sam3_processor(device, confidence_threshold, resolution)
 
     # ------------------------------------------------------------------
@@ -82,24 +82,38 @@ class Sam3Segmentor(PromptToSegment):
     # ------------------------------------------------------------------
 
     def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
-        return self._segment_by_coord(rgb_image, prompt)
+        if self._llm is None:
+            masks, _ = self.generate_masks_from_prompt(rgb_image, prompt)
+            return self.build_results(masks)
+        return self.segment_by_coord(rgb_image, prompt)
 
     def generate_masks_from_prompt(
         self, rgb_image: np.ndarray, prompt: str
     ) -> tuple[list[np.ndarray], list[float]]:
-        raise NotImplementedError(
-            "Sam3Segmentor does not support SOM grounding. Use grounding='coord'."
-        )
+        """Feed the text prompt directly into SAM3's text encoder."""
+        pil_image = PILImage.fromarray(rgb_image)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            state = self._processor.set_image(pil_image)
+            self._processor.reset_all_prompts(state)
+            state = self._processor.set_text_prompt(state=state, prompt=prompt)
+        nb_objects = len(state.get("scores", []))
+        if nb_objects == 0:
+            return [], []
+        masks_np  = [state["masks"][i].squeeze(0).cpu().numpy().astype(bool) for i in range(nb_objects)]
+        scores_np = [state["scores"][i].item() for i in range(nb_objects)]
+        order = np.argsort(scores_np)[::-1]
+        return [masks_np[i] for i in order], [scores_np[i] for i in order]
 
     def generate_masks_from_bbox(
         self,
         rgb_image: np.ndarray,
         boxes: list[tuple[float, float, float, float]],
     ) -> tuple[list[np.ndarray], list[float]]:
-        """Feed all ratio boxes into SAM3's geometric prompt in one pass.
+        """For each box, run a separate SAM3 inference and keep the highest-scoring mask.
 
-        Boxes are accumulated in the state (no reset between them); SAM3 returns
-        one mask per box in a single inference call.
+        SAM3 generates multiple candidate masks per prompt; processing each box
+        independently and taking the best score ensures exactly one mask per box.
+        Image encoding is done once and reused across all boxes.
         """
         pil_image = PILImage.fromarray(rgb_image)
 
@@ -109,13 +123,21 @@ class Sam3Segmentor(PromptToSegment):
         print(f"[sam3_bbox] image encoding: {time.perf_counter() - t_encode:.3f}s", flush=True)
 
         t_prompts = time.perf_counter()
+        best_masks: list[np.ndarray] = []
+        best_scores: list[float] = []
         with torch.autocast("cuda", dtype=torch.bfloat16):
             for rx1, ry1, rx2, ry2 in boxes:
+                self._processor.reset_all_prompts(state)
                 sam3_box = _xyxy_ratio_to_sam3_box(rx1, ry1, rx2, ry2)
                 state = self._processor.add_geometric_prompt(sam3_box, True, state)
+                masks, scores = _extract_masks(state)
+                if masks:
+                    best_idx = int(np.argmax(scores))
+                    best_masks.append(masks[best_idx])
+                    best_scores.append(scores[best_idx])
         print(f"[sam3_bbox] geometric prompts ({len(boxes)} box(es)): {time.perf_counter() - t_prompts:.3f}s", flush=True)
 
-        return _extract_masks(state)
+        return best_masks, best_scores
 
     def draw_boxes_overlay(
         self,

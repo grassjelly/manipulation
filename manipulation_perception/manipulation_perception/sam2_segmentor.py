@@ -12,7 +12,7 @@ import torch
 from sam2.build_sam import build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 
-from .prompt_to_segment import LiteLLMClient, PromptToSegment
+from .prompt_to_segment import LiteLLMClient, PromptToSegment, SegmentResult
 
 _DEFAULT_CHECKPOINT = os.path.expanduser("~/sam2_checkpoints/sam2.1_hiera_large.pt")
 _DEFAULT_MODEL_CFG  = "configs/sam2.1/sam2.1_hiera_l.yaml"
@@ -75,9 +75,9 @@ class Sam2Segmentor(PromptToSegment):
         )
 
     def generate_masks(
-        self, rgb_image: np.ndarray, prompt: str
+        self, rgb_image: np.ndarray
     ) -> tuple[list[np.ndarray], list[float]]:
-        """Run SAM2 automatic mask generation; *prompt* is ignored."""
+        """Run SAM2 automatic mask generation"""
         # SAM2 expects a uint8 HWC RGB numpy array
         raw_masks = self._generator.generate(rgb_image)
 
@@ -90,3 +90,6 @@ class Sam2Segmentor(PromptToSegment):
         masks  = [m["segmentation"].astype(bool) for m in raw_masks]
         scores = [float(m["predicted_iou"])       for m in raw_masks]
         return masks, scores
+
+    def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
+        return self.segment_som(rgb_image, prompt)
