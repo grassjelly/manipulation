@@ -9,7 +9,7 @@ import json
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
@@ -28,7 +28,7 @@ _MASK_COLOURS: list[tuple[int, int, int]] = [
 ]
 
 
-def overlay_ratio_grid(rgb_image: np.ndarray, n: int = 10) -> np.ndarray:
+def draw_grid(rgb_image: np.ndarray, n: int = 10) -> np.ndarray:
     """Return a copy of *rgb_image* with a subtle n×n ratio-coordinate grid overlaid.
 
     Grid lines are drawn at every 1/n interval in both axes.  Each intersection
@@ -150,6 +150,101 @@ class SegmentResult:
     mask_ids: list[int]           # indices of all mask regions that form this instance
 
 
+@dataclass
+class SegmentDebug:
+    """Diagnostic snapshot populated after every ``segment()`` call."""
+    vlm_text_prompt: str = ""
+    vlm_input_image: np.ndarray | None = None          # image sent to the VLM
+    vlm_raw_output: str | None = None                  # raw JSON returned by the VLM
+    bbox_prompt: list[tuple[float, float, float, float]] = field(default_factory=list)
+    vlm_time_s: float = 0.0           # VLM call (box prediction or SOM arbitration)
+    segmentation_time_s: float = 0.0  # mask-generation backend
+    inference_time_s: float = 0.0     # total end-to-end
+
+
+def draw_masks(
+    rgb_image: np.ndarray,
+    results: list[SegmentResult],
+    contour_thickness: int = 2,
+    font_scale: float = 0.5,
+    show_index: bool = True,
+) -> np.ndarray:
+    """Return a copy of *rgb_image* with each mask outlined and optionally labelled."""
+    canvas = rgb_image.copy()
+
+    for result in results:
+        mask_id = result.mask_ids[0]
+        colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
+        mask_u8 = result.mask.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(canvas, contours, -1, colour, contour_thickness)
+
+    if show_index:
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text_thickness = max(1, round(font_scale * 2))
+        pad = 1
+        for result in results:
+            mask_id = result.mask_ids[0]
+            colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
+            u, v = result.centroid_px
+            label = str(mask_id)
+            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, text_thickness)
+            x0 = u - tw // 2 - pad
+            y0 = v - th // 2 - pad
+            x1 = u + tw // 2 + pad
+            y1 = v + th // 2 + pad + baseline
+            cv2.rectangle(canvas, (x0, y0), (x1, y1), (255, 255, 255), cv2.FILLED)
+            cv2.putText(canvas, label, (u - tw // 2, v + th // 2),
+                        font, font_scale, colour, text_thickness, cv2.LINE_AA)
+
+    return canvas
+
+
+def draw_bboxes(
+    rgb_image: np.ndarray,
+    boxes: list[tuple[float, float, float, float]],
+    thickness: int = 3,
+    font_scale: float = 0.7,
+    show_index: bool = True,
+    colours: list[tuple[int, int, int]] | None = None,
+    index_offset: int = 0,
+) -> np.ndarray:
+    """Return a copy of *rgb_image* with each ratio bounding box drawn.
+
+    Parameters
+    ----------
+    colours
+        Colour palette to cycle through.  Defaults to ``_MASK_COLOURS``.
+    index_offset
+        Added to the box index when forming the label (e.g. ``1`` for 1-based).
+    """
+    palette = colours if colours is not None else _MASK_COLOURS
+    h, w = rgb_image.shape[:2]
+    canvas = rgb_image.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    text_thickness = max(1, round(font_scale * 2))
+
+    for idx, (rx1, ry1, rx2, ry2) in enumerate(boxes):
+        x1, y1 = int(rx1 * w), int(ry1 * h)
+        x2, y2 = int(rx2 * w), int(ry2 * h)
+        colour = palette[idx % len(palette)]
+
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), colour, thickness)
+
+        if show_index:
+            label = str(idx + index_offset)
+            (tw, th), _ = cv2.getTextSize(label, font, font_scale, text_thickness)
+            pad = 4
+            lx, ly = x1, y1 - pad
+            if ly - th < 0:
+                ly = y1 + th + pad
+            cv2.rectangle(canvas, (lx - pad, ly - th - pad), (lx + tw + pad, ly + pad),
+                          (255, 255, 255), cv2.FILLED)
+            cv2.putText(canvas, label, (lx, ly), font, font_scale, colour, text_thickness, cv2.LINE_AA)
+
+    return canvas
+
+
 class PromptToSegment(ABC):
     """
     Base class for prompt-driven instance segmentation backends.
@@ -166,9 +261,7 @@ class PromptToSegment(ABC):
 
     def __init__(self, llm_client: LiteLLMClient | None = None) -> None:
         self._llm = llm_client
-        self.last_grid_image: np.ndarray | None = None
-        self.last_llm_output: str | None = None
-        self.last_boxes: list[tuple[float, float, float, float]] = []
+        self.debug: SegmentDebug | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -201,23 +294,25 @@ class PromptToSegment(ABC):
 
     def segment_som(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         """Set-of-marks grounding: numbered mask overlay + LLM arbitration."""
-        t0 = time.perf_counter()
+        t_total = time.perf_counter()
+
+        t_seg = time.perf_counter()
         masks, _ = self.generate_masks(rgb_image)
-        print(f"[segment] generate_masks: {time.perf_counter() - t0:.3f}s", flush=True)
+        segmentation_time = time.perf_counter() - t_seg
         if not masks:
-            print("No masks generated", flush=True)
+            self.debug = SegmentDebug(
+                vlm_text_prompt=prompt,
+                segmentation_time_s=segmentation_time,
+                inference_time_s=time.perf_counter() - t_total,
+            )
             return []
 
         results = self.build_results(masks)
-        annotated_image = self.draw_overlay(rgb_image, results)
+        annotated_image = draw_masks(rgb_image, results)
 
-        # _save_path = "/home/ros/ros2_ws/src/debug_overlay.jpg"
-        # cv2.imwrite(_save_path, cv2.cvtColor(annotated_image, cv2.COLOR_RGB2BGR))
-        # print(f"[segment] overlay saved to {_save_path}", flush=True)
-
-        t0 = time.perf_counter()
-        instances_ids = self._query_llm(annotated_image, prompt)
-        print(f"[segment] _query_llm: {time.perf_counter() - t0:.3f}s", flush=True)
+        t_vlm = time.perf_counter()
+        instances_ids, vlm_raw = self._query_llm(annotated_image, prompt)
+        vlm_time = time.perf_counter() - t_vlm
 
         segment_results: list[SegmentResult] = []
         for id_group in instances_ids:
@@ -232,30 +327,56 @@ class PromptToSegment(ABC):
             segment_results.append(
                 SegmentResult(mask=merged_mask, centroid_px=centroid_px, mask_ids=valid_ids)
             )
+
+        self.debug = SegmentDebug(
+            vlm_text_prompt=prompt,
+            vlm_input_image=annotated_image,
+            vlm_raw_output=vlm_raw,
+            vlm_time_s=vlm_time,
+            segmentation_time_s=segmentation_time,
+            inference_time_s=time.perf_counter() - t_total,
+        )
         return segment_results
 
     def segment_by_coord(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         """Coordinate/bbox grounding: VLM predicts boxes, backend refines them into masks."""
+        t_total = time.perf_counter()
+
         h, w = rgb_image.shape[:2]
         scale  = min(_MAX_SEND_DIM / max(h, w), 1.0)
         send_w = int(w * scale)
         send_h = int(h * scale)
         send_img = (cv2.resize(rgb_image, (send_w, send_h), interpolation=cv2.INTER_AREA)
                     if scale < 1.0 else rgb_image.copy())
+        send_img = draw_grid(send_img)
 
-        send_img = overlay_ratio_grid(send_img)
-        self.last_grid_image = send_img
-
-        t0 = time.perf_counter()
-        boxes = self._ask_vlm_for_boxes(send_img, prompt)
-        print(f"[segment] VLM bbox prediction: {time.perf_counter() - t0:.3f}s  ({len(boxes)} box(es))", flush=True)
+        t_vlm = time.perf_counter()
+        boxes, vlm_raw = self._ask_vlm_for_boxes(send_img, prompt)
+        vlm_time = time.perf_counter() - t_vlm
 
         if not boxes:
+            self.debug = SegmentDebug(
+                vlm_text_prompt=prompt,
+                vlm_input_image=send_img,
+                vlm_raw_output=vlm_raw,
+                vlm_time_s=vlm_time,
+                inference_time_s=time.perf_counter() - t_total,
+            )
             return []
 
-        t0 = time.perf_counter()
+        t_seg = time.perf_counter()
         masks, _ = self.generate_masks_from_bbox(rgb_image, boxes)
-        print(f"[segment] generate_masks_from_bbox: {time.perf_counter() - t0:.3f}s", flush=True)
+        segmentation_time = time.perf_counter() - t_seg
+
+        self.debug = SegmentDebug(
+            vlm_text_prompt=prompt,
+            vlm_input_image=send_img,
+            vlm_raw_output=vlm_raw,
+            bbox_prompt=boxes,
+            vlm_time_s=vlm_time,
+            segmentation_time_s=segmentation_time,
+            inference_time_s=time.perf_counter() - t_total,
+        )
 
         if not masks:
             return []
@@ -333,42 +454,6 @@ class PromptToSegment(ABC):
             results.append(SegmentResult(mask=mask, centroid_px=centroid_px, mask_ids=[idx]))
         return results
 
-    def draw_overlay(
-        self,
-        rgb_image: np.ndarray,
-        results: list[SegmentResult],
-        contour_thickness: int = 2,
-        font_scale: float = 0.5,
-    ) -> np.ndarray:
-        """Return a copy of *rgb_image* with each mask outlined and labelled."""
-        canvas = rgb_image.copy()
-
-        for result in results:
-            mask_id = result.mask_ids[0]
-            colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
-            mask_u8 = result.mask.astype(np.uint8) * 255
-            contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(canvas, contours, -1, colour, contour_thickness)
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        text_thickness = max(1, round(font_scale * 2))
-        pad = 1
-        for result in results:
-            mask_id = result.mask_ids[0]
-            colour = _MASK_COLOURS[mask_id % len(_MASK_COLOURS)]
-            u, v = result.centroid_px
-            label = str(mask_id)
-            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, text_thickness)
-            x0 = u - tw // 2 - pad
-            y0 = v - th // 2 - pad
-            x1 = u + tw // 2 + pad
-            y1 = v + th // 2 + pad + baseline
-            cv2.rectangle(canvas, (x0, y0), (x1, y1), (255, 255, 255), cv2.FILLED)
-            cv2.putText(canvas, label, (u - tw // 2, v + th // 2),
-                        font, font_scale, colour, text_thickness, cv2.LINE_AA)
-
-        return canvas
-
     def _image_to_base64(self, image: np.ndarray) -> str:
         # canvas is RGB; imencode expects BGR
         bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
@@ -377,8 +462,10 @@ class PromptToSegment(ABC):
             raise RuntimeError("cv2.imencode failed")
         return base64.b64encode(buf.tobytes()).decode("utf-8")
 
-    def _query_llm(self, annotated_image: np.ndarray, prompt: str) -> list[list[int]]:
-        """Send the annotated image to the LLM; return mask-ID groups per instance."""
+    def _query_llm(
+        self, annotated_image: np.ndarray, prompt: str
+    ) -> tuple[list[list[int]], str]:
+        """Send the annotated image to the LLM; return (mask-ID groups, raw response)."""
         system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(prompt=prompt)
         b64 = self._image_to_base64(annotated_image)
 
@@ -410,12 +497,12 @@ class PromptToSegment(ABC):
         )
 
         raw = response.choices[0].message.content or ""
-        return self._parse_instances(raw)
+        return self._parse_instances(raw), raw
 
     def _ask_vlm_for_boxes(
         self, grid_image: np.ndarray, prompt: str
-    ) -> list[tuple[float, float, float, float]]:
-        """Send the grid-overlaid image to the VLM; return ratio bounding boxes."""
+    ) -> tuple[list[tuple[float, float, float, float]], str]:
+        """Send the grid-overlaid image to the VLM; return (ratio bounding boxes, raw response)."""
         system_prompt = _BBOX_SYSTEM_PROMPT.format(prompt=prompt)
         b64 = self._image_to_base64(grid_image)
 
@@ -447,10 +534,8 @@ class PromptToSegment(ABC):
         )
 
         raw = response.choices[0].message.content or ""
-        self.last_llm_output = raw
         boxes = self._parse_boxes(raw)
-        self.last_boxes = boxes
-        return boxes
+        return boxes, raw
 
     @staticmethod
     def _parse_boxes(raw: str) -> list[tuple[float, float, float, float]]:

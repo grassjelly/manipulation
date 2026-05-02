@@ -4,9 +4,6 @@ No ROS dependency — pure numpy/PIL/torch.
 """
 from __future__ import annotations
 
-import time
-
-import cv2
 import numpy as np
 import torch
 from PIL import Image as PILImage
@@ -117,12 +114,9 @@ class Sam3Segmentor(PromptToSegment):
         """
         pil_image = PILImage.fromarray(rgb_image)
 
-        t_encode = time.perf_counter()
         with torch.autocast("cuda", dtype=torch.bfloat16):
             state = self._processor.set_image(pil_image)
-        print(f"[sam3_bbox] image encoding: {time.perf_counter() - t_encode:.3f}s", flush=True)
 
-        t_prompts = time.perf_counter()
         best_masks: list[np.ndarray] = []
         best_scores: list[float] = []
         with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -135,52 +129,6 @@ class Sam3Segmentor(PromptToSegment):
                     best_idx = int(np.argmax(scores))
                     best_masks.append(masks[best_idx])
                     best_scores.append(scores[best_idx])
-        print(f"[sam3_bbox] geometric prompts ({len(boxes)} box(es)): {time.perf_counter() - t_prompts:.3f}s", flush=True)
 
         return best_masks, best_scores
 
-    def draw_boxes_overlay(
-        self,
-        rgb_image: np.ndarray,
-        boxes: list[tuple[float, float, float, float]] | None = None,
-        thickness: int = 3,
-        font_scale: float = 0.7,
-    ) -> np.ndarray:
-        """Return a copy of *rgb_image* with each VLM-predicted bounding box drawn.
-
-        Parameters
-        ----------
-        rgb_image
-            Source image in RGB order.
-        boxes
-            List of ``(rx1, ry1, rx2, ry2)`` ratio boxes.  Defaults to
-            ``self.last_boxes`` when not supplied.
-        """
-        from .prompt_to_segment import _MASK_COLOURS
-
-        if boxes is None:
-            boxes = self.last_boxes
-
-        h, w = rgb_image.shape[:2]
-        canvas = rgb_image.copy()
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        text_thickness = max(1, round(font_scale * 2))
-
-        for idx, (rx1, ry1, rx2, ry2) in enumerate(boxes):
-            x1, y1 = int(rx1 * w), int(ry1 * h)
-            x2, y2 = int(rx2 * w), int(ry2 * h)
-            colour = _MASK_COLOURS[idx % len(_MASK_COLOURS)]
-
-            cv2.rectangle(canvas, (x1, y1), (x2, y2), colour, thickness)
-
-            label = str(idx)
-            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, text_thickness)
-            pad = 4
-            lx, ly = x1, y1 - pad
-            if ly - th < 0:
-                ly = y1 + th + pad
-            cv2.rectangle(canvas, (lx - pad, ly - th - pad), (lx + tw + pad, ly + pad),
-                          (255, 255, 255), cv2.FILLED)
-            cv2.putText(canvas, label, (lx, ly), font, font_scale, colour, text_thickness, cv2.LINE_AA)
-
-        return canvas
