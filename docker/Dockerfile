@@ -96,8 +96,8 @@ RUN git clone https://github.com/facebookresearch/sam2 ${HOME}/sam2 && \
 
 # Pre-download SAM2.1 large checkpoint (~900 MB).
 RUN mkdir -p ${HOME}/sam2_checkpoints && \
-    wget -q -O ${HOME}/sam2_checkpoints/sam2.1_hiera_large.pt \
-        https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+    wget -q -O ${HOME}/sam2_checkpoints/sam2.1_hiera_small.pt \
+        https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
 
 RUN pip install litellm "numpy<2" "opencv-python<4.11"
 
