@@ -21,14 +21,12 @@ import numpy as np
 from manipulation_perception.prompt_to_segment import LiteLLMClient, draw_masks, draw_bboxes
 from manipulation_perception.sam3_segmentor import Sam3Segmentor
 from manipulation_perception.sam2_segmentor import Sam2Segmentor
+from manipulation_perception.owlv2_sam2_segmentor import Owlv2Sam2Segmentor
 from manipulation_perception.vision_banana import VisionBananaSegmentor, VisionBananaBboxSegmentor
 
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 IMAGE_PATH = os.path.normpath(os.path.join(_DATA_DIR, "image.png"))
 
-# ---------------------------------------------------------------------------
-# Shared LLM client (used by SAM2, VLM, and VisionBanana backends)
-# ---------------------------------------------------------------------------
 
 _LLM_IMAGE_GEN = LiteLLMClient(
     model="openai/gemini-3.1-flash-image-preview",
@@ -38,57 +36,60 @@ _LLM_IMAGE_GEN = LiteLLMClient(
 
 
 _LLM_REASONING = LiteLLMClient(
-    model="openai/vllm",
+    model="openai/gemini-3.1-flash-lite-preview",
     api_base="http://localhost:4000",
     api_key="sk-1234",
 )
 
-# ---------------------------------------------------------------------------
-# Configurations — add/remove entries to change what gets tested.
+# Add/remove entries to change what gets tested.
 # Uncomment alternative variants to compare different parameter settings.
-# ---------------------------------------------------------------------------
 
 CONFIGS: list[dict] = [
     # --- SAM3 (VLM bounding-box → SAM3 geometric prompt) ---
-    {
-        "name": "sam3_llm",
-        "factory": lambda: Sam3Segmentor(llm_client=_LLM_REASONING, device="cuda"),
-    },
+    
+    
+    # {
+    #     "name": "sam3_llm",
+    #     "factory": lambda: Sam3Segmentor(llm_client=_LLM_REASONING, device="cuda"),
+    # },
 
-    {
-        "name": "sam3_prompt",
-        "factory": lambda: Sam3Segmentor(device="cuda"),
+    # {
+    #     "name": "sam3_prompt",
+    #     "factory": lambda: Sam3Segmentor(device="cuda"),
 
-    },
+    # },
 
-    # --- SAM2 (automatic masks + LLM arbitration) ---
-    {
-        "name": "sam2",
-        "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING),
+    # # --- SAM2 (automatic masks + LLM arbitration) ---
+    # {
+    #     "name": "sam2",
+    #     "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING),
+    # },
 
-    },
-    # --- Vision Banana (generative colour-coded mask) ---
+    # --- OWLv2 + SAM2 (OWLv2 zero-shot bbox → SAM2 mask refinement) ---
     {
-        "name": "vision_banana_default",
-        "factory": lambda: VisionBananaSegmentor(llm_client=_LLM_IMAGE_GEN),
+        "name": "owlv2_sam2",
+        "factory": lambda: Owlv2Sam2Segmentor(device="cuda"),
     },
+    # # --- Vision Banana (generative colour-coded mask) ---
+    # {
+    #     "name": "vision_banana_default",
+    #     "factory": lambda: VisionBananaSegmentor(llm_client=_LLM_IMAGE_GEN),
+    # },
 
-    # --- Vision Banana Bbox (VLM bbox → image-gen mask) ---
-    {
-        "name": "vision_banana_bbox",
-        "factory": lambda: VisionBananaBboxSegmentor(
-            llm_client=_LLM_REASONING,
-            image_gen_client=_LLM_IMAGE_GEN,
-        ),
-    },
+    # # # --- Vision Banana Bbox (VLM bbox → image-gen mask) ---
+    # {
+    #     "name": "vision_banana_bbox",
+    #     "factory": lambda: VisionBananaBboxSegmentor(
+    #         llm_client=_LLM_REASONING,
+    #         image_gen_client=_LLM_IMAGE_GEN,
+    #     ),
+    # },
 
 ]
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def load_image(path: str) -> np.ndarray:
+    """Load an image from *path* and return it as an RGB uint8 array."""
     bgr = cv2.imread(path)
     if bgr is None:
         raise FileNotFoundError(f"Could not load image: {path}")
@@ -102,6 +103,7 @@ def run_config(
     out_dir: str,
     log_lines: list[str],
 ) -> None:
+    """Instantiate one segmentor config, run inference, print results, and save outputs to *out_dir*."""
     name = cfg["name"]
     header = f"\n{'=' * 60}\nConfig : {name}\nPrompt : {prompt!r}\n{'=' * 60}"
     print(header)
@@ -159,10 +161,6 @@ def run_config(
             print(f"  Saved: {boxes_path}")
             log_lines.append(f"  Saved: {boxes_path}")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Test segmentation inference")

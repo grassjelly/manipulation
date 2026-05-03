@@ -21,8 +21,6 @@ from scipy.spatial.transform import Rotation
 from .prompt_to_segment import SegmentResult
 
 
-# ── public return type ────────────────────────────────────────────────────────
-
 @dataclass
 class ObjectPose:
     """3-D pose of one detected object instance, expressed in the reference frame."""
@@ -31,8 +29,6 @@ class ObjectPose:
     centroid_px: tuple[int, int]  # (u, v) pixel centroid used for deprojection
     mask: np.ndarray          # bool (H, W) — the raw segmentation mask
 
-
-# ── segmentor duck-type contract ──────────────────────────────────────────────
 
 @runtime_checkable
 class SegmentorProtocol(Protocol):
@@ -43,8 +39,6 @@ class SegmentorProtocol(Protocol):
     def segment(self, rgb: np.ndarray, prompt: str) -> list[SegmentResult]:
         ...
 
-
-# ── main class ────────────────────────────────────────────────────────────────
 
 class ObjectFinder:
     """
@@ -142,8 +136,6 @@ class ObjectFinder:
 
         return poses
 
-
-# ── private helpers ───────────────────────────────────────────────────────────
 
 def _deproject(
     centroid_px: tuple[int, int],

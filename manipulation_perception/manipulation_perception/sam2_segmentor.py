@@ -81,18 +81,12 @@ class Sam2Segmentor(PromptToSegment):
         else:
             self._predictor = SAM2ImagePredictor(sam2_model)
 
-    # ------------------------------------------------------------------
-    # PromptToSegment abstract method implementation
-    # ------------------------------------------------------------------
 
     def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         if self._grounding == "som":
             return self.segment_som(rgb_image, prompt)
         return self.segment_by_coord(rgb_image, prompt)
 
-    # ------------------------------------------------------------------
-    # Grounding backends
-    # ------------------------------------------------------------------
 
     def generate_masks(
         self, rgb_image: np.ndarray
@@ -106,7 +100,7 @@ class Sam2Segmentor(PromptToSegment):
         scores = [float(m["predicted_iou"])       for m in raw_masks]
         return masks, scores
 
-    def generate_masks_from_bbox(
+    def generate_masks_from_bboxes(
         self,
         rgb_image: np.ndarray,
         boxes: list[tuple[float, float, float, float]],

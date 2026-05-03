@@ -1,3 +1,11 @@
+"""
+ROS2 node for AprilTag/ArUco detection and camera-to-reference TF broadcasting.
+
+Subscribes to colour, depth, and camera-info topics, detects a target AprilTag,
+reconstructs the tag pose via RANSAC plane fitting and corner deprojection, and
+broadcasts the camera_link TF frame in the reference frame at 20 Hz.
+No ROS-independent library here — all logic is in the sensor callbacks.
+"""
 import cv2
 import rclpy
 import rclpy.duration
@@ -25,6 +33,8 @@ from .transform_math import compute_tag_frame, build_T_ref_cam, rotation_to_quat
 
 
 class CameraTagTFNode(Node):
+    """Detect a known AprilTag in the live camera stream and broadcast the camera TF."""
+
     def __init__(self):
         super().__init__('camera_tag_tf')
 
@@ -97,7 +107,6 @@ class CameraTagTFNode(Node):
             f'ref="{self.ref_frame}" cam="{self.cam_frame}"'
         )
 
-    # ── static tag TF ─────────────────────────────────────────────────────
 
     def _publish_tag_static_tf(self) -> None:
         broadcaster = tf2_ros.StaticTransformBroadcaster(self)
@@ -125,7 +134,6 @@ class CameraTagTFNode(Node):
             f'rpy=({self.tag_roll:.3f},{self.tag_pitch:.3f},{self.tag_yaw:.3f})'
         )
 
-    # ── sensor callbacks ──────────────────────────────────────────────────
 
     def _info_cb(self, msg: CameraInfo) -> None:
         if self.camera_matrix is None:
@@ -163,10 +171,8 @@ class CameraTagTFNode(Node):
 
         self._try_compute_tf(tag_corners, depth_img)
 
-    # ── TF computation ────────────────────────────────────────────────────
 
     def _try_compute_tf(self, tag_corners: np.ndarray, depth_img: np.ndarray) -> None:
-        # ── resolve optical→camera_link rotation (once, then cached) ─────
         if self._T_camlink_optical is None:
             if self.camera_optical_frame == self.cam_frame:
                 # same frame — identity, no lookup needed
@@ -190,7 +196,6 @@ class CameraTagTFNode(Node):
                     )
                     return
 
-        # ── 3D reconstruction ─────────────────────────────────────────────
         points_3d = bbox_points_to_3d(tag_corners, depth_img, self.camera_matrix)
         if points_3d is None:
             self.get_logger().warn('Too few valid depth pixels in tag bounding box.')
@@ -211,7 +216,6 @@ class CameraTagTFNode(Node):
             self.get_logger().warn('Degenerate tag corner geometry.')
             return
 
-        # ── compose transforms ────────────────────────────────────────────
         x_axis, y_axis, z_axis = axes
 
         # T_ref_optical: pose of the color optical frame in reference_frame
@@ -234,10 +238,10 @@ class CameraTagTFNode(Node):
                 'Subscriptions destroyed; broadcasting TF at 20 Hz.'
             )
 
-    # ── helpers ───────────────────────────────────────────────────────────
 
     @staticmethod
     def _tf_msg_to_matrix(tf_stamped) -> np.ndarray:
+        """Convert a TransformStamped message into a (4, 4) homogeneous matrix."""
         tr  = tf_stamped.transform.translation
         rot = tf_stamped.transform.rotation
         T   = np.eye(4)
@@ -245,7 +249,6 @@ class CameraTagTFNode(Node):
         T[:3, 3]  = [tr.x, tr.y, tr.z]
         return T
 
-    # ── TF broadcast ──────────────────────────────────────────────────────
 
     def _broadcast_tf(self) -> None:
         if self._cached_tf is None:
@@ -268,7 +271,6 @@ class CameraTagTFNode(Node):
 
         self.tf_broadcaster.sendTransform(t)
 
-    # ── cleanup ───────────────────────────────────────────────────────────
 
     def _destroy_subs(self) -> None:
         self.destroy_subscription(self.image_sub)

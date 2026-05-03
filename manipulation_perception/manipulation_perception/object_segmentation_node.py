@@ -42,10 +42,11 @@ _INSTANCE_COLORS: list[tuple[int, int, int]] = [
 
 
 class ObjectSegmentationNode(Node):
+    """Segment objects by text prompt and publish one TF frame per detected instance."""
+
     def __init__(self) -> None:
         super().__init__('object_segmentation')
 
-        # ── parameters ────────────────────────────────────────────────────
         self.declare_parameter('camera_topic',           '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic',            '/camera/camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('camera_info_topic',      '/camera/camera/color/camera_info')
@@ -76,7 +77,6 @@ class ObjectSegmentationNode(Node):
             api_key  = gp('litellm_api_key').string_value,
         )
 
-        # ── internal state ─────────────────────────────────────────────────
         self._bridge         = CvBridge()
         self._latest_color:  Image | None = None
         self._latest_depth:  Image | None = None
@@ -84,7 +84,6 @@ class ObjectSegmentationNode(Node):
         # arrives, because ObjectFinder takes it at construction time.
         self._finder: ObjectFinder | None = None
 
-        # ── subscriptions ──────────────────────────────────────────────────
         self._info_sub = self.create_subscription(
             CameraInfo, camera_info_topic, self._info_cb, 10
         )
@@ -96,16 +95,13 @@ class ObjectSegmentationNode(Node):
         )
         self._sync.registerCallback(self._sync_cb)
 
-        # ── TF ─────────────────────────────────────────────────────────────
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self)
         self.tf_buffer      = tf2_ros.Buffer()
         self.tf_listener    = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        # ── optional visualisation publishers ──────────────────────────────
         if self._enable_vis:
             self._vis_pub = self.create_publisher(Image, '~/segmentation_vis', 10)
 
-        # ── load model (blocks until ready) ────────────────────────────────
         self.get_logger().info(f'Loading Sam3Segmentor (device={device})…')
         self._segmentor = Sam3Segmentor(
             # llm_client=llm_client,
@@ -119,7 +115,6 @@ class ObjectSegmentationNode(Node):
 
         self.create_timer(1.0, self._segment_timer_cb)
 
-    # ── sensor callbacks ───────────────────────────────────────────────────
 
     def _info_cb(self, msg: CameraInfo) -> None:
         if self._finder is None:
@@ -134,7 +129,6 @@ class ObjectSegmentationNode(Node):
         self._latest_color = color_msg
         self._latest_depth = depth_msg
 
-    # ── 1 Hz segmentation timer ────────────────────────────────────────────
 
     def _segment_timer_cb(self) -> None:
         if (
@@ -201,7 +195,6 @@ class ObjectSegmentationNode(Node):
             vis_msg.header = color_msg.header
             self._vis_pub.publish(vis_msg)
 
-    # ── TF publishing ──────────────────────────────────────────────────────
 
     def _publish_object_tf(self, stamp, child_frame: str, pose: ObjectPose) -> None:
         q = pose.quaternion
@@ -219,14 +212,13 @@ class ObjectSegmentationNode(Node):
         self.tf_broadcaster.sendTransform(t)
 
 
-# ── module-level helpers ──────────────────────────────────────────────────────
-
 def _draw_overlay(
     rgb: np.ndarray,
     poses: list[ObjectPose],
     find_ms: float,
     prompt: str,
 ) -> np.ndarray:
+    """Return *rgb* with coloured mask fills, bounding boxes, and timing text overlaid."""
     canvas = rgb.copy()
     for idx, pose in enumerate(poses):
         color = _INSTANCE_COLORS[idx % len(_INSTANCE_COLORS)]
@@ -272,6 +264,7 @@ def _draw_overlay(
 
 
 def _tf_msg_to_matrix(tf_stamped) -> np.ndarray:
+    """Convert a TransformStamped message into a (4, 4) homogeneous matrix."""
     tr  = tf_stamped.transform.translation
     rot = tf_stamped.transform.rotation
     T   = np.eye(4)

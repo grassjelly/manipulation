@@ -14,11 +14,8 @@ from sam3.model.sam3_image_processor import Sam3Processor
 from .prompt_to_segment import LiteLLMClient, PromptToSegment, SegmentResult
 
 
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
 def _build_sam3_processor(device: str, confidence_threshold: float, resolution: int) -> Sam3Processor:
+    """Build and return a configured Sam3Processor with TF32 acceleration enabled."""
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     model = build_sam3_image_model(bpe_path=None, device=device)
@@ -26,6 +23,7 @@ def _build_sam3_processor(device: str, confidence_threshold: float, resolution: 
 
 
 def _extract_masks(state: dict) -> tuple[list[np.ndarray], list[float]]:
+    """Extract boolean masks and scores from a SAM3 inference state dict."""
     nb_objects = len(state.get("scores", []))
     if nb_objects == 0:
         return [], []
@@ -74,9 +72,6 @@ class Sam3Segmentor(PromptToSegment):
         super().__init__(llm_client=llm_client)
         self._processor = _build_sam3_processor(device, confidence_threshold, resolution)
 
-    # ------------------------------------------------------------------
-    # PromptToSegment abstract method implementations
-    # ------------------------------------------------------------------
 
     def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         if self._llm is None:
@@ -101,7 +96,7 @@ class Sam3Segmentor(PromptToSegment):
         order = np.argsort(scores_np)[::-1]
         return [masks_np[i] for i in order], [scores_np[i] for i in order]
 
-    def generate_masks_from_bbox(
+    def generate_masks_from_bboxes(
         self,
         rgb_image: np.ndarray,
         boxes: list[tuple[float, float, float, float]],

@@ -25,11 +25,8 @@ import litellm
 from .prompt_to_segment import LiteLLMClient, PromptToSegment, SegmentDebug, SegmentResult, draw_bboxes
 
 
-# ---------------------------------------------------------------------------
-# Palette used when asking the model to colour each instance
 # Chosen to be visually distinct and well-separated in RGB space so that
 # pixel-colour clustering is reliable.
-# ---------------------------------------------------------------------------
 _INSTANCE_COLOURS: list[tuple[int, int, int]] = [
     (255,   0,   0),   # pure red
     (  0, 255,   0),   # pure green
@@ -148,9 +145,6 @@ class VisionBananaSegmentor(PromptToSegment):
         self._colour_tolerance = colour_tolerance
         self._min_cluster_px = min_cluster_px
 
-    # ------------------------------------------------------------------
-    # PromptToSegment interface
-    # ------------------------------------------------------------------
 
     def generate_masks(
         self, rgb_image: np.ndarray, prompt: str
@@ -202,11 +196,9 @@ class VisionBananaSegmentor(PromptToSegment):
         )
         return results
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _build_segmentation_prompt(self, prompt: str) -> str:
+        """Return the per-instance colour-fill instruction sent to the image-generation model."""
         colour_spec = _build_colour_spec(self._max_instances)
         return (
             f"Generate an instance segmentation mask image for the following object: {prompt}.\n\n"
@@ -393,14 +385,11 @@ class VisionBananaBboxSegmentor(VisionBananaSegmentor):
         )
         self._image_gen = image_gen_client
 
-    # ------------------------------------------------------------------
-    # PromptToSegment interface
-    # ------------------------------------------------------------------
 
     def segment(self, rgb_image: np.ndarray, prompt: str) -> list[SegmentResult]:
         return self.segment_by_coord(rgb_image, prompt)
 
-    def generate_masks_from_bbox(
+    def generate_masks_from_bboxes(
         self,
         rgb_image: np.ndarray,
         boxes: list[tuple[float, float, float, float]],
@@ -430,11 +419,9 @@ class VisionBananaBboxSegmentor(VisionBananaSegmentor):
 
         return masks, scores
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _build_bbox_seg_prompt(self, n_boxes: int) -> str:
+        """Return the per-box colour-fill instruction sent to the image-generation model."""
         colour_spec = _build_colour_spec(n_boxes)
         return (
             "Generate an instance segmentation mask image.\n\n"
