@@ -50,21 +50,21 @@ CONFIGS: list[dict] = [
         "name": "sam3_coord",
         "factory": lambda: Sam3Segmentor(llm_client=_LLM_REASONING, device="cuda"),
     },
+    
     # --- SAM3 (Segment using prompt input) ---
-
     {
         "name": "sam3_end_to_end",
         "factory": lambda: Sam3Segmentor(),
 
     },
 
-    # --- SAM2 (LLM bbox + bbox prompt) ---
+    # --- SAM2 (VLM bounding-bbox → SAM2 bbox prompt) ---
     {
         "name": "sam2_coord",
         "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING),
     },
 
-    # --- SAM2 (automatic masks + LLM arbitration) ---
+    # --- SAM2 (SAM2 automatic masks → LLM arbitration) ---
     {
         "name": "sam2_som",
         "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING, grounding="som"),
@@ -82,7 +82,7 @@ CONFIGS: list[dict] = [
         "factory": lambda: VisionBananaSegmentor(llm_client=_LLM_IMAGE_GEN),
     },
 
-    # # --- Vision Banana Bbox (VLM bbox → image-gen mask) ---
+    # --- Vision Banana Bbox (VLM bbox → image-gen mask) ---
     {
         "name": "vision_banana_bbox",
         "factory": lambda: VisionBananaBboxSegmentor(
