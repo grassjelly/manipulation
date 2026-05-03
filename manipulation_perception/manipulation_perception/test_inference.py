@@ -47,27 +47,35 @@ _LLM_REASONING = LiteLLMClient(
 CONFIGS: list[dict] = [
     # --- SAM3 (VLM bounding-box → SAM3 geometric prompt) ---    
     {
-        "name": "sam3_llm",
+        "name": "sam3_coord",
         "factory": lambda: Sam3Segmentor(llm_client=_LLM_REASONING, device="cuda"),
     },
+    # --- SAM3 (Segment using prompt input) ---
 
     {
-        "name": "sam3_prompt",
-        "factory": lambda: Sam3Segmentor(device="cuda"),
+        "name": "sam3_end_to_end",
+        "factory": lambda: Sam3Segmentor(),
 
+    },
+
+    # --- SAM2 (LLM bbox + bbox prompt) ---
+    {
+        "name": "sam2_coord",
+        "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING),
     },
 
     # --- SAM2 (automatic masks + LLM arbitration) ---
     {
-        "name": "sam2",
-        "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING),
+        "name": "sam2_som",
+        "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING, grounding="som"),
     },
 
     # --- OWLv2 + SAM2 (OWLv2 zero-shot bbox → SAM2 mask refinement) ---
     {
         "name": "owlv2_sam2",
-        "factory": lambda: Owlv2Sam2Segmentor(device="cuda"),
+        "factory": lambda: Owlv2Sam2Segmentor(),
     },
+
     # --- Vision Banana (generative colour-coded mask) ---
     {
         "name": "vision_banana_default",
