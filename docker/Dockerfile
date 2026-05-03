@@ -99,6 +99,16 @@ RUN mkdir -p ${HOME}/sam2_checkpoints && \
     wget -q -O ${HOME}/sam2_checkpoints/sam2.1_hiera_small.pt \
         https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
 
+# Install OWLv2 (zero-shot object detector used by Owlv2Sam2Segmentor).
+RUN pip install transformers accelerate
+
+# Pre-download OWLv2 weights (publicly available, no token required).
+RUN python3 -c "\
+from transformers import Owlv2Processor, Owlv2ForObjectDetection; \
+Owlv2Processor.from_pretrained('google/owlv2-base-patch16-ensemble'); \
+Owlv2ForObjectDetection.from_pretrained('google/owlv2-base-patch16-ensemble'); \
+print('OWLv2 weights pre-loaded successfully.')"
+
 RUN pip install litellm "numpy<2" "opencv-python<4.11"
 
 # Install RMW implementation
