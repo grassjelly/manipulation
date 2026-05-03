@@ -77,7 +77,7 @@ def draw_grid(rgb_image: np.ndarray, n: int = 10) -> np.ndarray:
 _MAX_SEND_DIM = 1024  # longest side sent to the VLM for coord grounding
 
 _BBOX_SYSTEM_PROMPT = (
-    "You are a vision assistant helping a robot manipulation system.\n\n"
+    "You are a vision assistant to identify objects in a scene.\n\n"
     'Task: Locate every separate physical instance of "{prompt}" in the image.\n\n'
     "The image has a reference grid overlaid on it.  Each grid line intersection "
     "is labelled with its ratio coordinate in the form rx,ry, where rx is the "
@@ -96,8 +96,7 @@ _BBOX_SYSTEM_PROMPT = (
 )
 
 _SYSTEM_PROMPT_TEMPLATE = (
-    "You are a vision assistant helping a robot manipulation system identify "
-    "objects in a scene.\n\n"
+    "You are a vision assistant to identify objects in a scene.\n\n"
     "Context: The image has been pre-processed for instance segmentation. "
     "Each detected region is outlined with a distinct colour and labelled with "
     "a numeric mask ID on a white background.  A single physical object may be "
@@ -145,6 +144,7 @@ class LiteLLMClient:
 
 @dataclass
 class SegmentResult:
+    """Output of one segmented object instance."""
     mask: np.ndarray              # bool (H, W) — union of all chosen mask regions
     centroid_px: tuple[int, int]  # (u, v) pixel coords of the merged mask centroid
     mask_ids: list[int]           # indices of all mask regions that form this instance
@@ -263,9 +263,6 @@ class PromptToSegment(ABC):
         self._llm = llm_client
         self.debug: SegmentDebug | None = None
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     @abstractmethod
     def segment(
@@ -351,7 +348,7 @@ class PromptToSegment(ABC):
         send_img = draw_grid(send_img)
 
         t_vlm = time.perf_counter()
-        boxes, vlm_raw = self._ask_vlm_for_boxes(send_img, prompt)
+        boxes, vlm_raw = self.generate_bboxes(send_img, prompt)
         vlm_time = time.perf_counter() - t_vlm
 
         if not boxes:
@@ -365,7 +362,7 @@ class PromptToSegment(ABC):
             return []
 
         t_seg = time.perf_counter()
-        masks, _ = self.generate_masks_from_bbox(rgb_image, boxes)
+        masks, _ = self.generate_masks_from_bboxes(rgb_image, boxes)
         segmentation_time = time.perf_counter() - t_seg
 
         self.debug = SegmentDebug(
@@ -382,9 +379,6 @@ class PromptToSegment(ABC):
             return []
         return self.build_results(masks)
 
-    # ------------------------------------------------------------------
-    # Abstract hooks — subclasses provide the segmentation backend
-    # ------------------------------------------------------------------
 
     def generate_masks(
         self, rgb_image: np.ndarray
@@ -399,7 +393,7 @@ class PromptToSegment(ABC):
             f"{type(self).__name__} does not implement generate_masks."
         )
 
-    def generate_masks_from_bbox(
+    def generate_masks_from_bboxes(
         self,
         rgb_image: np.ndarray,
         boxes: list[tuple[float, float, float, float]],
@@ -419,7 +413,7 @@ class PromptToSegment(ABC):
         scores, one entry per box.  Used by ``segment_by_coord``.
         """
         raise NotImplementedError(
-            f"{type(self).__name__} does not implement generate_masks_from_bbox."
+            f"{type(self).__name__} does not implement generate_masks_from_bboxes."
         )
 
     def generate_masks_from_prompt(
@@ -438,13 +432,11 @@ class PromptToSegment(ABC):
             f"{type(self).__name__} does not implement generate_masks_from_prompt."
         )
 
-    # ------------------------------------------------------------------
-    # Shared helpers
-    # ------------------------------------------------------------------
 
     def build_results(
         self, masks: list[np.ndarray], min_mask_region_area: int = 100
     ) -> list[SegmentResult]:
+        """Convert raw boolean masks into SegmentResult objects, dropping tiny regions."""
         results: list[SegmentResult] = []
         for idx, mask in enumerate(masks):
             if mask.sum() < min_mask_region_area:
@@ -499,12 +491,16 @@ class PromptToSegment(ABC):
         raw = response.choices[0].message.content or ""
         return self._parse_instances(raw), raw
 
-    def _ask_vlm_for_boxes(
-        self, grid_image: np.ndarray, prompt: str
+    def generate_bboxes(
+        self, rgb_image: np.ndarray, prompt: str
     ) -> tuple[list[tuple[float, float, float, float]], str]:
-        """Send the grid-overlaid image to the VLM; return (ratio bounding boxes, raw response)."""
+        """Ask the VLM for bounding boxes; return (ratio bounding boxes, raw response).
+
+        Receives the already grid-overlaid image from ``segment_by_coord``.
+        Subclasses can override this to use a different box-prediction strategy.
+        """
         system_prompt = _BBOX_SYSTEM_PROMPT.format(prompt=prompt)
-        b64 = self._image_to_base64(grid_image)
+        b64 = self._image_to_base64(rgb_image)
 
         response = litellm.completion(
             model=self._llm.model,
@@ -537,8 +533,7 @@ class PromptToSegment(ABC):
         boxes = self._parse_boxes(raw)
         return boxes, raw
 
-    @staticmethod
-    def _parse_boxes(raw: str) -> list[tuple[float, float, float, float]]:
+    def _parse_boxes(self, raw: str) -> list[tuple[float, float, float, float]]:
         """Parse the VLM reply into a list of ``(rx1, ry1, rx2, ry2)`` ratio boxes."""
         cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
         decoder = json.JSONDecoder()
@@ -578,8 +573,7 @@ class PromptToSegment(ABC):
             boxes.append((rx1, ry1, rx2, ry2))
         return boxes
 
-    @staticmethod
-    def _parse_instances(raw: str) -> list[list[int]]:
+    def _parse_instances(self, raw: str) -> list[list[int]]:
         """Parse the LLM reply into a list of per-instance mask-ID groups."""
         cleaned = re.sub(r"```(?:json)?|```", "", raw).strip()
         try:
