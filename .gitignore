@@ -7,3 +7,4 @@ COLCON_IGNORE
 
 moveit*
 xarm*
+results
