@@ -25,7 +25,6 @@ import tf2_ros
 from scipy.spatial.transform import Rotation
 
 from .prompt_to_segment import LiteLLMClient
-from .sam3_segmentor import Sam3Segmentor
 from .sam2_segmentor import Sam2Segmentor
 from .object_finder import ObjectFinder, ObjectPose
 
@@ -103,12 +102,12 @@ class ObjectSegmentationNode(Node):
             self._vis_pub = self.create_publisher(Image, '~/segmentation_vis', 10)
 
         self.get_logger().info(f'Loading Sam3Segmentor (device={device})…')
-        self._segmentor = Sam3Segmentor(
-            # llm_client=llm_client,
+        self._segmentor = Sam2Segmentor(
+            llm_client=llm_client,
             device=device,
         )
         self.get_logger().info(
-            f'Sam3Segmentor ready.  prompt="{self._prompt}" '
+            f'Sam2Segmentor ready.  prompt="{self._prompt}" '
             f'ref="{self._ref_frame}" cam="{self._cam_frame}" '
             f'vis={self._enable_vis}'
         )
