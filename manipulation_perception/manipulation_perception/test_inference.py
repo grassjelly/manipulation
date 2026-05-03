@@ -45,46 +45,43 @@ _LLM_REASONING = LiteLLMClient(
 # Uncomment alternative variants to compare different parameter settings.
 
 CONFIGS: list[dict] = [
-    # --- SAM3 (VLM bounding-box → SAM3 geometric prompt) ---
-    
-    
-    # {
-    #     "name": "sam3_llm",
-    #     "factory": lambda: Sam3Segmentor(llm_client=_LLM_REASONING, device="cuda"),
-    # },
+    # --- SAM3 (VLM bounding-box → SAM3 geometric prompt) ---    
+    {
+        "name": "sam3_llm",
+        "factory": lambda: Sam3Segmentor(llm_client=_LLM_REASONING, device="cuda"),
+    },
 
-    # {
-    #     "name": "sam3_prompt",
-    #     "factory": lambda: Sam3Segmentor(device="cuda"),
+    {
+        "name": "sam3_prompt",
+        "factory": lambda: Sam3Segmentor(device="cuda"),
 
-    # },
+    },
 
-    # # --- SAM2 (automatic masks + LLM arbitration) ---
-    # {
-    #     "name": "sam2",
-    #     "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING),
-    # },
+    # --- SAM2 (automatic masks + LLM arbitration) ---
+    {
+        "name": "sam2",
+        "factory": lambda: Sam2Segmentor(llm_client=_LLM_REASONING),
+    },
 
     # --- OWLv2 + SAM2 (OWLv2 zero-shot bbox → SAM2 mask refinement) ---
     {
         "name": "owlv2_sam2",
         "factory": lambda: Owlv2Sam2Segmentor(device="cuda"),
     },
-    # # --- Vision Banana (generative colour-coded mask) ---
-    # {
-    #     "name": "vision_banana_default",
-    #     "factory": lambda: VisionBananaSegmentor(llm_client=_LLM_IMAGE_GEN),
-    # },
+    # --- Vision Banana (generative colour-coded mask) ---
+    {
+        "name": "vision_banana_default",
+        "factory": lambda: VisionBananaSegmentor(llm_client=_LLM_IMAGE_GEN),
+    },
 
-    # # # --- Vision Banana Bbox (VLM bbox → image-gen mask) ---
-    # {
-    #     "name": "vision_banana_bbox",
-    #     "factory": lambda: VisionBananaBboxSegmentor(
-    #         llm_client=_LLM_REASONING,
-    #         image_gen_client=_LLM_IMAGE_GEN,
-    #     ),
-    # },
-
+    # # --- Vision Banana Bbox (VLM bbox → image-gen mask) ---
+    {
+        "name": "vision_banana_bbox",
+        "factory": lambda: VisionBananaBboxSegmentor(
+            llm_client=_LLM_REASONING,
+            image_gen_client=_LLM_IMAGE_GEN,
+        ),
+    },
 ]
 
 
