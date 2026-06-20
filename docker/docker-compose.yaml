@@ -1,3 +1,5 @@
+name: ${PROJECT_NAME}
+
 services:
   build:
     image: ${PROJECT_NAME}:${BASE_IMAGE}
@@ -26,38 +28,55 @@ services:
       - GPU_ID=${GPU_ID:-0}
       - ROS_DOMAIN_ID=${DOCKER_ROS_DOMAIN_ID:-0}
       - RMW_IMPLEMENTATION=${DOCKER_RMW_IMPLEMENTATION}
-      - DISPLAY=${DISPLAY}
+      - DISPLAY=${DOCKER_DISPLAY:-${DISPLAY:-}}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - $HOME/.Xauthority:/home/ros/.Xauthority
+      - ros2_ws:/home/ros/${WORKSPACE_NAME:-ros2_ws}/
 
   bringup:
     container_name: bringup
     extends: base
-    command: ros2 launch xarm_moveit_config lite6_moveit_${BRINGUP_MODE:-realmove}.launch.py robot_ip:=192.168.1.151 add_gripper:=true
+    command: ros2 launch xarm_moveit_config lite6_moveit_${BRINGUP_MODE:-realmove}.launch.py robot_ip:=${ROBOT_IP:-192.168.1.151} add_custom_gripper:=true
     volumes:
       - ../xarm_ros2/xarm_moveit_config/launch/_robot_moveit_common2.launch.py:/home/ros/ros2_ws/install/xarm_moveit_config/share/xarm_moveit_config/launch/_robot_moveit_common2.launch.py:ro
+      - ../xarm_ros2/xarm_api/config/xarm_user_params.yaml:/home/ros/ros2_ws/install/xarm_api/share/xarm_api/config/xarm_user_params.yaml:ro
+
+  parallel-gripper:
+    container_name: parallel-gripper
+    extends: base
+    command: ros2 run parallel_gripper gripper_driver --ros-args -p hw_ns:=${HW_NS:-ufactory}
 
   realsense:
     container_name: realsense
     extends: base
     command: ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true
-    volumes:
-      - ../:/home/ros/${WORKSPACE_NAME:-ros2_ws}/src/
 
   camera-joint-state-publisher:
     container_name: camera-joint-state-publisher
     extends: base
     command: ros2 run manipulation_perception camera_joint_state_publisher
 
+  manipulation-servers:
+    container_name: manipulation-servers
+    extends: base
+    command: ros2 launch manipulation_servers servers.launch.py
+
   dev:
-    container_name: dev
+    container_name: ${PROJECT_NAME}-dev
     extends: base
     command: sleep infinity
     volumes:
       - ../:/home/ros/${WORKSPACE_NAME:-ros2_ws}/src/
     devices:
       - /dev/bus/usb:/dev/bus/usb
+
+  colcon-build:
+    container_name: ${PROJECT_NAME}-colcon-build
+    extends: base
+    command: colcon build --symlink-install
+    volumes:
+      - ../:/home/ros/${WORKSPACE_NAME:-ros2_ws}/src/
 
   kasmvnc:
     container_name: kasmvnc
@@ -67,3 +86,6 @@ services:
     - DISPLAY=:200
     volumes:
     - ./kasm-autostart:/defaults/autostart
+
+volumes:
+  ros2_ws:

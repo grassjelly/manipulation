@@ -2,13 +2,12 @@ name: dev
 root: <%= ENV["TMUXINATOR_CONFIG"] %>
 tmux_options: -f <%= ENV["TMUXINATOR_CONFIG"] %>/tmux.conf
 pre_window:
-  - export DISPLAY=:200
   - export HOST_UID=$(id -u)
   - export HOST_GID=$(id -g)
 
 on_project_start:
-  - DISPLAY=:200 docker compose up -d kasmvnc
-  - DISPLAY=:200 HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up -d dev
+  - docker compose up -d kasmvnc
+  - HOST_UID=$(id -u) HOST_GID=$(id -g) docker compose up -d dev
 
 on_project_stop:
   - docker compose down
@@ -17,7 +16,10 @@ windows:
   - main:
       panes:
         - docker compose up bringup
+        - docker compose up parallel-gripper
         - docker compose up realsense
         - docker compose up camera-joint-state-publisher
+        - docker compose up manipulation-servers
+
         - docker compose exec dev bash
 
