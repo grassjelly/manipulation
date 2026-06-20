@@ -8,3 +8,4 @@ COLCON_IGNORE
 moveit*
 xarm*
 results
+lite6_grippers
